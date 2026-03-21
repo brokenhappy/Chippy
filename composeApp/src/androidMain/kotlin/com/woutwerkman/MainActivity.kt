@@ -80,13 +80,22 @@ class MainActivity : ComponentActivity() {
                                     val platform = when {
                                         peer.id.startsWith("jvm-") -> "jvm"
                                         peer.id.startsWith("android-") -> "android-simulator"
-                                        peer.id.startsWith("ios-") -> "ios-simulator"
+                                        peer.id.startsWith("ios-") -> "ios-real-device" // Could be either
                                         else -> null
                                     }
 
-                                    if (platform != null && platform in targetPlatforms) {
-                                        discoveredPlatforms.add(platform)
-                                        Log.i("ConnectivityTest", "[$instanceId] Platform found: $platform (${discoveredPlatforms.size}/${targetPlatforms.size})")
+                                    if (platform != null) {
+                                        // Check for matching platform (ios-real-device and ios-simulator are compatible)
+                                        val matchingPlatform = when {
+                                            platform in targetPlatforms -> platform
+                                            platform == "ios-real-device" && "ios-simulator" in targetPlatforms -> "ios-simulator"
+                                            platform == "ios-simulator" && "ios-real-device" in targetPlatforms -> "ios-real-device"
+                                            else -> null
+                                        }
+                                        if (matchingPlatform != null) {
+                                            discoveredPlatforms.add(matchingPlatform)
+                                            Log.i("ConnectivityTest", "[$instanceId] Platform found: $matchingPlatform (${discoveredPlatforms.size}/${targetPlatforms.size})")
+                                        }
                                     }
 
                                     if (discoveredPlatforms.containsAll(targetPlatforms)) {

@@ -84,6 +84,52 @@ fun getConnectedEmulators(): List<String> {
     }
 }
 
+// Check if iOS real device is connected
+fun isIosRealDeviceAvailable(): Boolean {
+    return getConnectedIosDevices().isNotEmpty()
+}
+
+// Get connected iOS real device info (returns list of Pair<UDID, DeviceName>)
+fun getConnectedIosDevices(): List<Pair<String, String>> {
+    return try {
+        val process = ProcessBuilder("xcrun", "xctrace", "list", "devices")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        process.waitFor()
+
+        val devices = mutableListOf<Pair<String, String>>()
+        var inDevicesSection = false
+
+        for (line in output.lines()) {
+            if (line.startsWith("== Devices ==")) {
+                inDevicesSection = true
+                continue
+            }
+            if (line.startsWith("== Simulators ==")) {
+                break // Stop at simulators section
+            }
+            if (inDevicesSection && line.isNotBlank() && !line.startsWith("==")) {
+                // Parse: "Device Name (OS Version) (UDID)" where UDID can be various formats
+                // e.g., "iPhone (26.3.1) (00008110-001A68212E9A801E)"
+                // Skip devices that are clearly not iPhones/iPads (like Macs, Apple Watches)
+                if (line.contains("iPhone") || line.contains("iPad")) {
+                    // Extract the last parenthesized value as UDID
+                    val lastParenMatch = Regex("\\(([^)]+)\\)$").find(line.trim())
+                    if (lastParenMatch != null) {
+                        val udid = lastParenMatch.groupValues[1]
+                        val name = line.substringBefore(" (").trim()
+                        devices.add(Pair(udid, name))
+                    }
+                }
+            }
+        }
+        devices
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
 // Capture values at configuration time for configuration cache compatibility
 val rootDirPath: String = rootProject.projectDir.absolutePath
 val jvmClasspath = kotlin.jvm().compilations["main"].runtimeDependencyFiles +
@@ -144,6 +190,7 @@ tasks.register("testConnectibility") {
             val isAvailable = when (platform) {
                 "jvm" -> true
                 "android-simulator" -> isAndroidEmulatorAvailable()
+                "ios-real-device" -> isIosRealDeviceAvailable()
                 else -> false
             }
 
@@ -172,10 +219,15 @@ tasks.register("testConnectibility") {
         val platformsString = availablePlatforms.joinToString(",")
         val processes = mutableListOf<Process>()
 
+        // Pre-build phase: Build all platforms BEFORE launching any instances
+        var jvmClasspath: String? = null
+        var androidApkPath: String? = null
+        var iosDeviceUdid: String? = null
+        var iosDeviceName: String? = null
+
         try {
-            // Launch 2 JVM instances if JVM is in the platform list
+            // Pre-build JVM
             if (availablePlatforms.contains("jvm")) {
-                // Build once and get classpath
                 logger.lifecycle("Pre-building JVM classes and getting classpath...")
                 val classpathBuilder = ProcessBuilder(
                     "$capturedRootDir/gradlew",
@@ -193,8 +245,93 @@ tasks.register("testConnectibility") {
                 if (classpath.isEmpty() || classpathProcess.exitValue() != 0) {
                     throw GradleException("Failed to get JVM classpath")
                 }
+                jvmClasspath = classpath
+            }
 
-                // Get Java home
+            // Pre-build iOS (takes the longest, so start early)
+            if (availablePlatforms.contains("ios-real-device")) {
+                val iosDevices = getConnectedIosDevices()
+                if (iosDevices.isNotEmpty()) {
+                    val device = iosDevices.first()
+                    iosDeviceUdid = device.first
+                    iosDeviceName = device.second
+
+                    logger.lifecycle("Pre-building iOS app for device: $iosDeviceName ($iosDeviceUdid)")
+
+                    // Build with xcodebuild
+                    val xcodeBuildProcess = ProcessBuilder(
+                        "xcodebuild",
+                        "-project", "$capturedRootDir/iosApp/iosApp.xcodeproj",
+                        "-scheme", "iosApp",
+                        "-configuration", "Debug",
+                        "-destination", "id=$iosDeviceUdid",
+                        "-derivedDataPath", "$capturedRootDir/build/ios-derived-data",
+                        "build"
+                    )
+                        .directory(File(capturedRootDir))
+                        .inheritIO()
+                    xcodeBuildProcess.environment().putAll(System.getenv())
+                    val xcodeBuild = xcodeBuildProcess.start()
+                    val xcodeExitCode = xcodeBuild.waitFor()
+
+                    if (xcodeExitCode != 0) {
+                        logger.warn("WARNING: Failed to build iOS app")
+                        iosDeviceUdid = null
+                    } else {
+                        // Install the app
+                        logger.lifecycle("Installing iOS app on device...")
+                        val installProcess = ProcessBuilder(
+                            "xcrun", "devicectl", "device", "install", "app",
+                            "--device", iosDeviceUdid!!,
+                            "$capturedRootDir/build/ios-derived-data/Build/Products/Debug-iphoneos/iosApp.app"
+                        )
+                            .inheritIO()
+                            .start()
+                        installProcess.waitFor()
+                    }
+                }
+            }
+
+            // Pre-build Android
+            if (availablePlatforms.contains("android-simulator")) {
+                logger.lifecycle("Pre-building Android APK...")
+                val buildProcess = ProcessBuilder(
+                    "$capturedRootDir/gradlew",
+                    ":composeApp:assembleDebug",
+                    "--no-configuration-cache"
+                )
+                    .directory(File(capturedRootDir))
+                    .inheritIO()
+                    .start()
+                val buildExitCode = buildProcess.waitFor()
+                if (buildExitCode == 0) {
+                    androidApkPath = "$capturedRootDir/composeApp/build/outputs/apk/debug/composeApp-debug.apk"
+                }
+            }
+
+            // ============================================================
+            // LAUNCH PHASE: All builds complete, now launch all instances
+            // ============================================================
+            logger.lifecycle("All builds complete, launching instances...")
+
+            // Launch iOS first (it takes time to start)
+            if (iosDeviceUdid != null) {
+                logger.lifecycle("Launching iOS app on $iosDeviceName...")
+                val launchProcess = ProcessBuilder(
+                    "xcrun", "devicectl", "device", "process", "launch",
+                    "--device", iosDeviceUdid!!,
+                    "com.woutwerkman.Chippy"
+                )
+                    .inheritIO()
+                    .start()
+                launchProcess.waitFor()
+
+                // Give iOS a head start
+                Thread.sleep(3000)
+            }
+
+            // Launch JVM instances
+            if (jvmClasspath != null) {
                 val javaHome = System.getProperty("java.home")
                 val javaCmd = "$javaHome/bin/java"
 
@@ -204,7 +341,7 @@ tasks.register("testConnectibility") {
 
                     val processBuilder = ProcessBuilder(
                         javaCmd,
-                        "-cp", classpath,
+                        "-cp", jvmClasspath!!,
                         "-Dtest.platforms=$platformsString",
                         "-Dtest.instance.id=$instanceId",
                         "com.woutwerkman.connectivitytest.ConnectivityTestMainKt"
@@ -225,64 +362,37 @@ tasks.register("testConnectibility") {
                 }
             }
 
-            // Launch Android emulator instances if available
-            // Note: Android simulator testing requires the main composeApp to be installed
-            // and running on the emulator. For now, we install and launch the main app.
-            if (availablePlatforms.contains("android-simulator")) {
+            // Launch Android emulator instances (using pre-built APK)
+            if (androidApkPath != null && availablePlatforms.contains("android-simulator")) {
                 val emulators = getConnectedEmulators()
                 val emulatorsToUse = emulators.take(2)
 
-                if (emulatorsToUse.isEmpty()) {
-                    logger.warn("WARNING: No emulators available for Android testing")
-                } else {
-                    if (emulatorsToUse.size < 2) {
-                        logger.warn("WARNING: Only ${emulatorsToUse.size} emulator(s) available, need 2 for full test")
+                if (emulatorsToUse.isNotEmpty()) {
+                    emulatorsToUse.forEachIndexed { i, emulatorId ->
+                        val instanceId = "android-${i + 1}"
+                        logger.lifecycle("Installing and launching on $emulatorId: $instanceId")
+
+                        // Install APK
+                        val installProcess = ProcessBuilder(
+                            "adb", "-s", emulatorId, "install", "-r", androidApkPath!!
+                        ).inheritIO().start()
+                        installProcess.waitFor()
+
+                        // Launch the app in connectivity test mode
+                        val launchProcess = ProcessBuilder(
+                            "adb", "-s", emulatorId, "shell", "am", "start",
+                            "-n", "com.woutwerkman/.MainActivity",
+                            "--ez", "connectivity_test", "true",
+                            "--es", "instanceId", instanceId,
+                            "--es", "platforms", platformsString
+                        ).inheritIO().start()
+                        launchProcess.waitFor()
+
+                        logger.lifecycle("Launched connectivity test on $emulatorId")
                     }
 
-                    // Build and install composeApp on each emulator
-                    logger.lifecycle("Building composeApp for Android...")
-                    val buildProcess = ProcessBuilder(
-                        "$capturedRootDir/gradlew",
-                        ":composeApp:assembleDebug",
-                        "--no-configuration-cache"
-                    )
-                        .directory(File(capturedRootDir))
-                        .inheritIO()
-                        .start()
-
-                    val buildExitCode = buildProcess.waitFor()
-                    if (buildExitCode != 0) {
-                        logger.warn("WARNING: Failed to build Android APK, skipping Android tests")
-                    } else {
-                        val apkPath = "$capturedRootDir/composeApp/build/outputs/apk/debug/composeApp-debug.apk"
-
-                        emulatorsToUse.forEachIndexed { i, emulatorId ->
-                            val instanceId = "android-${i + 1}"
-                            logger.lifecycle("Installing and launching on $emulatorId: $instanceId")
-
-                            // Install APK
-                            val installProcess = ProcessBuilder(
-                                "adb", "-s", emulatorId, "install", "-r", apkPath
-                            ).inheritIO().start()
-                            installProcess.waitFor()
-
-                            // Launch the app in connectivity test mode
-                            val launchProcess = ProcessBuilder(
-                                "adb", "-s", emulatorId, "shell", "am", "start",
-                                "-n", "com.woutwerkman/.MainActivity",
-                                "--ez", "connectivity_test", "true",
-                                "--es", "instanceId", instanceId,
-                                "--es", "platforms", platformsString
-                            ).inheritIO().start()
-                            launchProcess.waitFor()
-
-                            logger.lifecycle("Launched connectivity test on $emulatorId")
-                        }
-
-                        // Give Android instances time to start discovery
-                        logger.lifecycle("Waiting for Android instances to start discovery...")
-                        Thread.sleep(5000)
-                    }
+                    logger.lifecycle("Waiting for Android instances to start discovery...")
+                    Thread.sleep(5000)
                 }
             }
 

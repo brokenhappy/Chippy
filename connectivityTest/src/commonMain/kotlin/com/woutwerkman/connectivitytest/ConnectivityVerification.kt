@@ -23,6 +23,15 @@ enum class TestPlatform {
             "ios-real-device" -> IOS_REAL_DEVICE
             else -> null
         }
+
+        fun fromPeerId(peerId: String): TestPlatform? = when {
+            peerId.startsWith("jvm-") -> JVM
+            peerId.startsWith("android-") -> ANDROID_SIMULATOR // Could be either, treating as simulator
+            peerId.startsWith("ios-") -> IOS_REAL_DEVICE // Could be either, treating as real device
+            // If peer ID doesn't match any known pattern, assume it's from iOS
+            // (the old UdpTransport code uses random names without platform prefix)
+            else -> IOS_REAL_DEVICE
+        }
     }
 }
 
@@ -117,16 +126,27 @@ private suspend fun CoroutineScope.verifyConnectivity(
                     discoveredPeers[peer.id] = peer
 
                     // Determine platform from peer ID prefix
-                    val platform = when {
-                        peer.id.startsWith("jvm-") -> TestPlatform.JVM
-                        peer.id.startsWith("android-") -> TestPlatform.ANDROID_SIMULATOR
-                        peer.id.startsWith("ios-") -> TestPlatform.IOS_SIMULATOR
-                        else -> null
-                    }
+                    val platform = TestPlatform.fromPeerId(peer.id)
 
-                    if (platform != null && platform in config.targetPlatforms) {
-                        discoveredPlatforms.add(platform)
-                        println("[${config.instanceId}] Discovered platform: $platform (${discoveredPlatforms.size}/${config.targetPlatforms.size})")
+                    if (platform != null) {
+                        // Check if this platform or a compatible one is in target platforms
+                        // iOS real device and simulator are treated as compatible
+                        val matchingPlatform = when (platform) {
+                            TestPlatform.IOS_REAL_DEVICE ->
+                                if (TestPlatform.IOS_REAL_DEVICE in config.targetPlatforms) TestPlatform.IOS_REAL_DEVICE
+                                else if (TestPlatform.IOS_SIMULATOR in config.targetPlatforms) TestPlatform.IOS_SIMULATOR
+                                else null
+                            TestPlatform.IOS_SIMULATOR ->
+                                if (TestPlatform.IOS_SIMULATOR in config.targetPlatforms) TestPlatform.IOS_SIMULATOR
+                                else if (TestPlatform.IOS_REAL_DEVICE in config.targetPlatforms) TestPlatform.IOS_REAL_DEVICE
+                                else null
+                            else -> if (platform in config.targetPlatforms) platform else null
+                        }
+
+                        if (matchingPlatform != null) {
+                            discoveredPlatforms.add(matchingPlatform)
+                            println("[${config.instanceId}] Discovered platform: $matchingPlatform (${discoveredPlatforms.size}/${config.targetPlatforms.size})")
+                        }
                     }
 
                     // Check if we've discovered all target platforms

@@ -61,6 +61,7 @@ private class JvmPeerTransport(
     private val discoveredPeers = ConcurrentHashMap<String, PeerInfo>()
     private val serviceType = "_${serviceName}._udp.local."
     private var localAddress: String = "0.0.0.0"
+    private var dnsSdProcess: Process? = null
     
     fun start(scope: CoroutineScope) {
         isRunning = true
@@ -95,8 +96,9 @@ private class JvmPeerTransport(
     
     private fun startMdns(scope: CoroutineScope) {
         try {
-            val addr = InetAddress.getByName(localAddress)
-            jmdns = JmDNS.create(addr, "peer-jvm-$peerId")
+            // Create JmDNS without binding to specific address to allow cross-interface discovery
+            // This is important for hotspot setups where devices are on different interfaces
+            jmdns = JmDNS.create()
             println("[JVM-$peerId] JmDNS created")
 
             // Add service listener BEFORE registering our service to catch early announcements
@@ -185,12 +187,73 @@ private class JvmPeerTransport(
                     }
                 }
             }
+
+            // Fallback: Use native dns-sd command on macOS to discover services
+            // JmDNS sometimes fails to discover services on iPhone hotspots
+            if (System.getProperty("os.name").lowercase().contains("mac")) {
+                scope.launch(Dispatchers.IO) {
+                    println("[JVM-$peerId] Starting native dns-sd fallback discovery")
+                    discoverViaDnsSd()
+                }
+            }
         } catch (e: Exception) {
             println("[JVM-$peerId] Error starting mDNS: ${e.message}")
             e.printStackTrace()
         }
     }
     
+    private suspend fun discoverViaDnsSd() {
+        try {
+            // Run dns-sd browse command
+            val browseServiceType = "_${serviceName}._udp."
+            val process = ProcessBuilder("dns-sd", "-B", browseServiceType, "local.")
+                .redirectErrorStream(true)
+                .start()
+            dnsSdProcess = process
+
+            val reader = process.inputStream.bufferedReader()
+
+            while (isRunning) {
+                val line = reader.readLine() ?: break
+                // Parse dns-sd output: "Timestamp A/R Flags if Domain Service Type Instance Name"
+                // Example: "20:28:07.303  Add  3  23 local.  _chippy._udp.  BraveViper108|mn0pze5s-1d90urtmykcjb|172.20.10.1"
+                if (line.contains("Add") && line.contains(browseServiceType)) {
+                    // Extract the instance name (last part after service type)
+                    val parts = line.split("\\s+".toRegex())
+                    if (parts.size >= 7) {
+                        // Instance name is everything after the service type column
+                        val instanceNameStart = line.indexOf(browseServiceType)
+                        if (instanceNameStart >= 0) {
+                            val instanceName = line.substring(instanceNameStart + browseServiceType.length).trim()
+                            val nameParts = instanceName.split("|")
+                            if (nameParts.size >= 3) {
+                                val pName = nameParts[0]
+                                val pId = nameParts[1]
+                                val pAddr = nameParts[2]
+
+                                if (pId != peerId && !discoveredPeers.containsKey(pId)) {
+                                    println("[JVM-$peerId] Found service via dns-sd: $instanceName")
+                                    val peerInfo = PeerInfo(
+                                        id = pId,
+                                        name = pName,
+                                        address = pAddr,
+                                        port = DISCOVERY_PORT
+                                    )
+                                    discoveredPeers[pId] = peerInfo
+                                    incomingChannel.send(PeerMessage.Event.Discovered(peerInfo))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            process.destroy()
+        } catch (e: Exception) {
+            println("[JVM-$peerId] dns-sd discovery error: ${e.message}")
+        }
+    }
+
     private suspend fun listenForMessages() {
         val buffer = ByteArray(65535)
         println("[JVM-$peerId] Listening for messages on port $DISCOVERY_PORT")
@@ -260,6 +323,12 @@ private class JvmPeerTransport(
     
     fun stop() {
         isRunning = false
+        try {
+            dnsSdProcess?.destroyForcibly()
+            dnsSdProcess = null
+        } catch (e: Exception) {
+            println("[JVM-$peerId] Error stopping dns-sd: ${e.message}")
+        }
         try {
             serviceInfo?.let { jmdns?.unregisterService(it) }
             jmdns?.close()

@@ -11,12 +11,14 @@ plugins {
 }
 
 kotlin {
+    jvm("jvm")
+
     androidTarget {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_11)
         }
     }
-    
+
     listOf(
         iosArm64(),
         iosSimulatorArm64()
@@ -49,7 +51,23 @@ kotlin {
             implementation(libs.kotlin.test)
         }
         jvmMain.dependencies {
-            implementation(compose.desktop.currentOs)
+            implementation(compose.desktop.common)
+            // Only add platform-specific compose desktop for actual desktop builds
+            val osName = System.getProperty("os.name")
+            val targetOs = when {
+                osName == "Mac OS X" -> "macos"
+                osName.startsWith("Win") -> "windows"
+                osName.startsWith("Linux") -> "linux"
+                else -> null
+            }
+            val targetArch = when (System.getProperty("os.arch")) {
+                "x86_64", "amd64" -> "x64"
+                "aarch64" -> "arm64"
+                else -> null
+            }
+            if (targetOs != null && targetArch != null) {
+                implementation("org.jetbrains.compose.desktop:desktop-jvm-$targetOs-$targetArch:${libs.versions.composeMultiplatform.get()}")
+            }
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.ktor.client.cio)
             implementation(libs.jmdns)

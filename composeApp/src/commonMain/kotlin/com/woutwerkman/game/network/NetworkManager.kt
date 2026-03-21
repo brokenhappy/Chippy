@@ -184,9 +184,15 @@ class NetworkManager(
     
     private fun handleMessage(rawMessage: String) {
         try {
+            println("NetworkManager: Received raw message: ${rawMessage.take(100)}...")
             // Try to parse as different message types
-            val message = parseMessage(rawMessage) ?: return
-            
+            val message = parseMessage(rawMessage)
+            if (message == null) {
+                println("NetworkManager: Failed to parse message")
+                return
+            }
+            println("NetworkManager: Parsed as ${message::class.simpleName}")
+
             when (message) {
                 is NetworkMessage.Discovery -> handleDiscovery(message)
                 is NetworkMessage.ConnectionRequestMsg -> handleConnectionRequest(message)
@@ -244,9 +250,15 @@ class NetworkManager(
     }
     
     private fun handleConnectionRequest(message: NetworkMessage.ConnectionRequestMsg) {
+        println("NetworkManager: handleConnectionRequest from ${message.request.fromPlayer.name} (${message.request.fromPlayer.id})")
         // Also update last seen for the requester
         peerLastSeen[message.request.fromPlayer.id] = currentTimeMillis()
-        _pendingRequests.update { it + message.request }
+        _pendingRequests.update { requests ->
+            println("NetworkManager: Adding to pendingRequests, current count: ${requests.size}")
+            val updated = requests + message.request
+            println("NetworkManager: New pendingRequests count: ${updated.size}")
+            updated
+        }
     }
 
     private fun handlePeerLeaving(message: NetworkMessage.PeerLeaving) {

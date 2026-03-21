@@ -3,9 +3,12 @@ package com.woutwerkman.game.network
 import kotlinx.coroutines.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
+import javax.jmdns.JmDNS
+import javax.jmdns.ServiceEvent
+import javax.jmdns.ServiceInfo
+import javax.jmdns.ServiceListener
 
-// Multicast group for cross-platform discovery (iOS requires this)
-private const val MULTICAST_GROUP = "224.0.0.251"
+private const val SERVICE_TYPE = "_chippy._udp.local."
 
 actual fun createUdpNetworkTransport(peerId: String, peerName: String): NetworkTransport {
     return JvmUdpNetworkTransport(peerId, peerName)
@@ -20,10 +23,13 @@ class JvmUdpNetworkTransport(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var discoverySocket: DatagramSocket? = null
-    private var multicastSocket: MulticastSocket? = null
     private var gameSocket: DatagramSocket? = null
     private var isDiscovering = false
     private var isServerRunning = false
+
+    // Bonjour/mDNS
+    private var jmdns: JmDNS? = null
+    private var serviceInfo: ServiceInfo? = null
 
     private val connectedPeers = ConcurrentHashMap<String, PeerAddress>()
     private var localAddress: String = "0.0.0.0"
@@ -43,22 +49,13 @@ class JvmUdpNetworkTransport(
             try {
                 // Get local IP first
                 localAddress = getLocalIpAddress()
+                println("JVM: Local IP address: $localAddress")
 
-                // Create discovery socket to listen for broadcasts
+                // Create discovery socket to listen for direct messages
                 discoverySocket = DatagramSocket(null).apply {
                     reuseAddress = true
                     broadcast = true
                     bind(InetSocketAddress(DISCOVERY_PORT))
-                }
-
-                // Create multicast socket for iOS interoperability
-                try {
-                    multicastSocket = MulticastSocket(DISCOVERY_PORT).apply {
-                        reuseAddress = true
-                        joinGroup(InetSocketAddress(MULTICAST_GROUP, DISCOVERY_PORT), null)
-                    }
-                } catch (e: Exception) {
-                    println("Warning: Could not join multicast group: ${e.message}")
                 }
 
                 // Create game socket for direct communication
@@ -67,14 +64,9 @@ class JvmUdpNetworkTransport(
                 }
                 localPort = gameSocket?.localPort ?: GAME_PORT_START
 
-                // Start listening for discovery broadcasts
+                // Start listening for discovery messages
                 scope.launch {
                     listenForDiscovery()
-                }
-
-                // Start listening for multicast messages
-                scope.launch {
-                    listenForMulticast()
                 }
 
                 // Start listening for game messages
@@ -82,15 +74,74 @@ class JvmUdpNetworkTransport(
                     listenForGameMessages()
                 }
 
+                // Start Bonjour/mDNS service
+                startBonjour()
+
             } catch (e: Exception) {
-                println("Error starting discovery: ${e.message}")
+                println("JVM: Error starting discovery: ${e.message}")
                 e.printStackTrace()
             }
         }
     }
 
+    private fun startBonjour() {
+        try {
+            val addr = InetAddress.getByName(localAddress)
+            jmdns = JmDNS.create(addr, "chippy-jvm")
+            println("JVM: JmDNS created on $localAddress")
+
+            // Register our service - include peer info in service name
+            // Format: peerName|peerId|address
+            val serviceName = "$peerName|$peerId|$localAddress"
+            serviceInfo = ServiceInfo.create(
+                SERVICE_TYPE,
+                serviceName,
+                DISCOVERY_PORT,
+                "Chippy Game"
+            )
+            jmdns?.registerService(serviceInfo)
+            println("JVM: Bonjour service registered: $serviceName")
+
+            // Listen for other services
+            jmdns?.addServiceListener(SERVICE_TYPE, object : ServiceListener {
+                override fun serviceAdded(event: ServiceEvent) {
+                    println("JVM: Bonjour service added: ${event.name}")
+                    // Request resolution to get full info
+                    jmdns?.requestServiceInfo(event.type, event.name, true)
+                }
+
+                override fun serviceRemoved(event: ServiceEvent) {
+                    println("JVM: Bonjour service removed: ${event.name}")
+                }
+
+                override fun serviceResolved(event: ServiceEvent) {
+                    println("JVM: Bonjour service resolved: ${event.name}")
+                    val parts = event.name.split("|")
+                    if (parts.size >= 3) {
+                        val pName = parts[0]
+                        val pId = parts[1]
+                        val pAddr = parts[2]
+
+                        if (pId != peerId) {
+                            println("JVM: Found peer via Bonjour: $pName ($pId) at $pAddr")
+                            // Create a discovery message to feed into the normal flow
+                            val discoveryJson = """{"type":"com.woutwerkman.game.model.NetworkMessage.Discovery","peer":{"id":"$pId","name":"$pName","address":"$pAddr","port":$DISCOVERY_PORT}}"""
+                            messageHandler?.invoke(discoveryJson)
+                        }
+                    }
+                }
+            })
+            println("JVM: Bonjour listener started")
+
+        } catch (e: Exception) {
+            println("JVM: Error starting Bonjour: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
     private suspend fun listenForDiscovery() {
         val buffer = ByteArray(4096)
+        println("JVM: Starting discovery listener on port $DISCOVERY_PORT")
         while (isDiscovering && discoverySocket != null) {
             try {
                 val packet = DatagramPacket(buffer, buffer.size)
@@ -98,32 +149,14 @@ class JvmUdpNetworkTransport(
                     discoverySocket?.receive(packet)
                 }
                 val message = String(packet.data, 0, packet.length)
+                println("JVM: Discovery received from ${packet.address.hostAddress}:${packet.port} - ${message.take(80)}...")
 
-                // Don't process our own broadcasts
+                // Don't process our own messages
                 if (!message.contains(peerId)) {
+                    println("JVM: Passing message to handler (my peerId=$peerId)")
                     messageHandler?.invoke(message)
-                }
-            } catch (e: Exception) {
-                if (isDiscovering) {
-                    // Only log if still active
-                }
-            }
-        }
-    }
-
-    private suspend fun listenForMulticast() {
-        val buffer = ByteArray(4096)
-        while (isDiscovering && multicastSocket != null) {
-            try {
-                val packet = DatagramPacket(buffer, buffer.size)
-                withContext(Dispatchers.IO) {
-                    multicastSocket?.receive(packet)
-                }
-                val message = String(packet.data, 0, packet.length)
-
-                // Don't process our own broadcasts
-                if (!message.contains(peerId)) {
-                    messageHandler?.invoke(message)
+                } else {
+                    println("JVM: Filtered out own message (contains my peerId=$peerId)")
                 }
             } catch (e: Exception) {
                 if (isDiscovering) {
@@ -142,6 +175,7 @@ class JvmUdpNetworkTransport(
                     gameSocket?.receive(packet)
                 }
                 val message = String(packet.data, 0, packet.length)
+                println("JVM: Game message received: ${message.take(80)}...")
                 messageHandler?.invoke(message)
             } catch (e: Exception) {
                 if (isServerRunning || isDiscovering) {
@@ -156,26 +190,11 @@ class JvmUdpNetworkTransport(
     }
 
     override suspend fun broadcast(message: String) {
+        // With Bonjour, we don't need to broadcast for discovery
+        // But we keep this for compatibility - send to known broadcast addresses
         withContext(Dispatchers.IO) {
             try {
                 val data = message.toByteArray()
-
-                // Send to multicast group (for iOS)
-                try {
-                    val multicastPacket = DatagramPacket(
-                        data,
-                        data.size,
-                        InetAddress.getByName(MULTICAST_GROUP),
-                        DISCOVERY_PORT
-                    )
-                    DatagramSocket().use { socket ->
-                        socket.send(multicastPacket)
-                    }
-                } catch (e: Exception) {
-                    println("Multicast send error: ${e.message}")
-                }
-
-                // Also send to broadcast addresses (for other platforms)
                 val socket = DatagramSocket().apply {
                     broadcast = true
                 }
@@ -195,7 +214,7 @@ class JvmUdpNetworkTransport(
                 }
                 socket.close()
             } catch (e: Exception) {
-                println("Broadcast error: ${e.message}")
+                println("JVM: Broadcast error: ${e.message}")
             }
         }
     }
@@ -203,6 +222,7 @@ class JvmUdpNetworkTransport(
     override suspend fun sendTo(address: String, port: Int, message: String) {
         withContext(Dispatchers.IO) {
             try {
+                println("JVM: sendTo $address:$port - ${message.take(50)}...")
                 val data = message.toByteArray()
                 val packet = DatagramPacket(
                     data,
@@ -210,12 +230,12 @@ class JvmUdpNetworkTransport(
                     InetAddress.getByName(address),
                     port
                 )
-                // Use a fresh socket to send to avoid conflicts
                 DatagramSocket().use { socket ->
                     socket.send(packet)
                 }
+                println("JVM: Message sent successfully")
             } catch (e: Exception) {
-                println("SendTo error: ${e.message}")
+                println("JVM: SendTo error: ${e.message}")
             }
         }
     }
@@ -251,18 +271,24 @@ class JvmUdpNetworkTransport(
         isDiscovering = false
         isServerRunning = false
         scope.cancel()
+
+        // Cleanup Bonjour
         try {
-            multicastSocket?.leaveGroup(InetSocketAddress(MULTICAST_GROUP, DISCOVERY_PORT), null)
+            serviceInfo?.let { jmdns?.unregisterService(it) }
+            jmdns?.close()
         } catch (e: Exception) {
-            // Ignore
+            println("JVM: Error closing JmDNS: ${e.message}")
         }
+
         discoverySocket?.close()
-        multicastSocket?.close()
         gameSocket?.close()
     }
 
     private fun getLocalIpAddress(): String {
         try {
+            var preferredIp: String? = null
+            var fallbackIp: String? = null
+
             val interfaces = NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
                 val networkInterface = interfaces.nextElement()
@@ -272,12 +298,29 @@ class JvmUdpNetworkTransport(
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
                     if (address is Inet4Address && !address.isLoopbackAddress) {
-                        return address.hostAddress
+                        val ip = address.hostAddress
+                        println("JVM: Found interface ${networkInterface.name} with IP $ip")
+
+                        // Skip link-local addresses (169.254.x.x) as preferred
+                        if (!ip.startsWith("169.254.")) {
+                            // Prefer 172.20.10.x (iPhone hotspot) or 192.168.x.x or 10.x.x.x
+                            if (ip.startsWith("172.20.10.") || ip.startsWith("192.168.") || ip.startsWith("10.")) {
+                                preferredIp = ip
+                            } else if (fallbackIp == null) {
+                                fallbackIp = ip
+                            }
+                        } else if (fallbackIp == null) {
+                            fallbackIp = ip
+                        }
                     }
                 }
             }
+
+            val selectedIp = preferredIp ?: fallbackIp ?: "127.0.0.1"
+            println("JVM: Selected IP $selectedIp (preferred=$preferredIp, fallback=$fallbackIp)")
+            return selectedIp
         } catch (e: Exception) {
-            println("Error getting local IP: ${e.message}")
+            println("JVM: Error getting local IP: ${e.message}")
         }
         return "127.0.0.1"
     }
@@ -298,10 +341,9 @@ class JvmUdpNetworkTransport(
                 }
             }
         } catch (e: Exception) {
-            println("Error getting broadcast addresses: ${e.message}")
+            println("JVM: Error getting broadcast addresses: ${e.message}")
         }
 
-        // Fallback to common broadcast address
         if (addresses.isEmpty()) {
             addresses.add("255.255.255.255")
         }

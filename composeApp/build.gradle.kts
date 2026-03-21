@@ -27,8 +27,6 @@ kotlin {
         }
     }
     
-    jvm()
-    
     sourceSets {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
@@ -54,11 +52,13 @@ kotlin {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.ktor.client.cio)
+            implementation(libs.jmdns)
         }
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.ktor.client.cio)
+            implementation(libs.jmdns)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)

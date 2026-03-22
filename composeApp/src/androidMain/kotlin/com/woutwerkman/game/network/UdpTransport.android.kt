@@ -10,9 +10,9 @@ import javax.jmdns.ServiceListener
 
 private const val SERVICE_TYPE = "_chippy._udp.local."
 
-actual fun createUdpNetworkTransport(peerId: String, peerName: String): NetworkTransport {
-    return AndroidUdpNetworkTransport(peerId, peerName)
-}
+// Old Android-specific transport, now using common PeerNetTransport via createUdpNetworkTransport()
+// Keeping this class for reference but it's no longer used.
+@Deprecated("Use PeerNetTransport via createUdpNetworkTransport() instead")
 
 class AndroidUdpNetworkTransport(
     private val peerId: String,

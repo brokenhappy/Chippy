@@ -19,10 +19,9 @@ private fun ntohs(value: UShort): UShort {
 
 private const val SERVICE_TYPE = "_chippy._udp."
 
-@OptIn(ExperimentalForeignApi::class)
-actual fun createUdpNetworkTransport(peerId: String, peerName: String): NetworkTransport {
-    return IosUdpNetworkTransport(peerId, peerName)
-}
+// Old iOS-specific transport, now using common PeerNetTransport via createUdpNetworkTransport()
+// Keeping this class for reference but it's no longer used.
+@Deprecated("Use PeerNetTransport via createUdpNetworkTransport() instead")
 
 @OptIn(ExperimentalForeignApi::class)
 class IosUdpNetworkTransport(

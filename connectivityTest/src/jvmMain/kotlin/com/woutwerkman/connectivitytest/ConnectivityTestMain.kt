@@ -22,8 +22,7 @@ fun main() {
     val config = ConnectivityTestConfig(
         instanceId = instanceId,
         targetPlatforms = targetPlatforms,
-        discoveryTimeoutMs = 30_000,
-        testTimeoutMs = 60_000
+        timeoutMs = 60_000
     )
 
     val result = runBlocking {

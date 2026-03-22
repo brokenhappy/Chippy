@@ -27,30 +27,34 @@ sealed class PeerMessage {
     @Serializable
     sealed class Event : PeerMessage() {
         /**
-         * A new peer was discovered on the network.
+         * A peer has joined the network and bidirectional connectivity is verified.
+         * This means both we can see them AND they can see us.
+         *
+         * The internal handshake is handled automatically - consumers only see
+         * peers that are fully connected.
          */
         @Serializable
-        data class Discovered(val peer: PeerInfo) : Event()
+        data class Joined(val peer: PeerInfo) : Event()
 
         /**
-         * A previously discovered peer is no longer available.
+         * A previously connected peer has left the network.
          */
         @Serializable
-        data class Lost(val peerId: String) : Event()
+        data class Left(val peerId: String) : Event()
     }
 
     /**
-     * A message sent by another peer.
+     * A message sent by another peer (application-level data).
      */
     @Serializable
-    data class Data(
+    data class Received(
         val fromPeerId: String,
         val payload: ByteArray
     ) : PeerMessage() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other == null || this::class != other::class) return false
-            other as Data
+            other as Received
             return fromPeerId == other.fromPeerId && payload.contentEquals(other.payload)
         }
 
@@ -125,10 +129,19 @@ data class PeerNetConfig(
 )
 
 /**
- * Automatically tries to find available peers over LAN.
- * When you discover new peers on the net, [PeerMessage.Event.Discovered] is received.
- * All other messages are explicit messages sent over the peer network by the opposing
- * [withPeerNetConnection] calls across other devices in the same LAN.
+ * Establishes a connection to the peer network for discovering and communicating with other peers on the LAN.
+ *
+ * The connection handles all the complexity of peer discovery internally:
+ * - mDNS/Bonjour service advertisement and discovery
+ * - Bidirectional handshake verification (ensuring both peers can see each other)
+ * - Keep-alive and timeout management
+ *
+ * Consumers receive simple events:
+ * - [PeerMessage.Event.Joined]: A peer is fully connected (bidirectional connectivity verified)
+ * - [PeerMessage.Event.Left]: A peer has disconnected
+ * - [PeerMessage.Received]: Application data from a peer
+ *
+ * Internal protocol messages used for handshaking are hidden from consumers.
  */
 suspend fun <T> withPeerNetConnection(
     config: PeerNetConfig = PeerNetConfig(),

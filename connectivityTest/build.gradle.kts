@@ -17,6 +17,16 @@ kotlin {
 
     jvm()
 
+    listOf(
+        iosArm64(),
+        iosSimulatorArm64()
+    ).forEach { iosTarget ->
+        iosTarget.binaries.framework {
+            baseName = "ConnectivityTest"
+            isStatic = true
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             implementation(project(":composeApp"))
@@ -28,6 +38,9 @@ kotlin {
         }
 
         androidMain.dependencies {
+        }
+
+        iosMain.dependencies {
         }
     }
 }
@@ -256,16 +269,17 @@ tasks.register("testConnectibility") {
                     iosDeviceUdid = device.first
                     iosDeviceName = device.second
 
-                    logger.lifecycle("Pre-building iOS app for device: $iosDeviceName ($iosDeviceUdid)")
+                    logger.lifecycle("Pre-building iOS connectivity test app for device: $iosDeviceName ($iosDeviceUdid)")
 
-                    // Build with xcodebuild
+                    // Build the dedicated connectivity test app (not the main app)
                     val xcodeBuildProcess = ProcessBuilder(
                         "xcodebuild",
-                        "-project", "$capturedRootDir/iosApp/iosApp.xcodeproj",
-                        "-scheme", "iosApp",
+                        "-project", "$capturedRootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
+                        "-scheme", "iosConnectivityTest",
                         "-configuration", "Debug",
                         "-destination", "id=$iosDeviceUdid",
-                        "-derivedDataPath", "$capturedRootDir/build/ios-derived-data",
+                        "-derivedDataPath", "$capturedRootDir/build/ios-test-derived-data",
+                        "-allowProvisioningUpdates",
                         "build"
                     )
                         .directory(File(capturedRootDir))
@@ -275,15 +289,15 @@ tasks.register("testConnectibility") {
                     val xcodeExitCode = xcodeBuild.waitFor()
 
                     if (xcodeExitCode != 0) {
-                        logger.warn("WARNING: Failed to build iOS app")
+                        logger.warn("WARNING: Failed to build iOS connectivity test app")
                         iosDeviceUdid = null
                     } else {
-                        // Install the app
-                        logger.lifecycle("Installing iOS app on device...")
+                        // Install the test app
+                        logger.lifecycle("Installing iOS connectivity test app on device...")
                         val installProcess = ProcessBuilder(
                             "xcrun", "devicectl", "device", "install", "app",
                             "--device", iosDeviceUdid!!,
-                            "$capturedRootDir/build/ios-derived-data/Build/Products/Debug-iphoneos/iosApp.app"
+                            "$capturedRootDir/build/ios-test-derived-data/Build/Products/Debug-iphoneos/iosConnectivityTest.app"
                         )
                             .inheritIO()
                             .start()
@@ -314,23 +328,7 @@ tasks.register("testConnectibility") {
             // ============================================================
             logger.lifecycle("All builds complete, launching instances...")
 
-            // Launch iOS first (it takes time to start)
-            if (iosDeviceUdid != null) {
-                logger.lifecycle("Launching iOS app on $iosDeviceName...")
-                val launchProcess = ProcessBuilder(
-                    "xcrun", "devicectl", "device", "process", "launch",
-                    "--device", iosDeviceUdid!!,
-                    "com.woutwerkman.Chippy"
-                )
-                    .inheritIO()
-                    .start()
-                launchProcess.waitFor()
-
-                // Give iOS a head start
-                Thread.sleep(3000)
-            }
-
-            // Launch JVM instances
+            // Launch JVM instances FIRST so they're ready when iOS starts
             if (jvmClasspath != null) {
                 val javaHome = System.getProperty("java.home")
                 val javaCmd = "$javaHome/bin/java"
@@ -360,6 +358,36 @@ tasks.register("testConnectibility") {
                         }
                     }.start()
                 }
+
+                // Give JVM instances time to start mDNS discovery
+                Thread.sleep(2000)
+            }
+
+            // Launch iOS connectivity test app AFTER JVM instances are running
+            if (iosDeviceUdid != null) {
+                val iosInstanceId = "ios-${System.currentTimeMillis().toString(36)}"
+                logger.lifecycle("Launching iOS connectivity test on $iosDeviceName with instanceId=$iosInstanceId...")
+
+                // Launch the dedicated test app with --console to capture output
+                val launchProcess = ProcessBuilder(
+                    "xcrun", "devicectl", "device", "process", "launch",
+                    "--device", iosDeviceUdid!!,
+                    "--console",  // Capture console output
+                    "com.woutwerkman.ChippyConnectivityTest",
+                    "--instance-id", iosInstanceId,
+                    "--platforms", platformsString
+                )
+                    .redirectErrorStream(true)
+                    .start()
+
+                processes.add(launchProcess)
+
+                // Log iOS output in background thread
+                Thread {
+                    launchProcess.inputStream.bufferedReader().forEachLine { line ->
+                        logger.lifecycle("[ios] $line")
+                    }
+                }.start()
             }
 
             // Launch Android emulator instances (using pre-built APK)
@@ -396,8 +424,8 @@ tasks.register("testConnectibility") {
                 }
             }
 
-            // Wait for all processes with timeout
-            val timeoutMs = 120_000L
+            // Wait for all processes with timeout (30s to allow for iOS permission prompt)
+            val timeoutMs = 30_000L
             val startTime = System.currentTimeMillis()
 
             for ((index, process) in processes.withIndex()) {

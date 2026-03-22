@@ -8,7 +8,12 @@ import platform.darwin.*
 import platform.posix.*
 import kotlin.random.Random
 
-private const val MESSAGE_PORT = 41234
+private const val MESSAGE_PORT = 47391
+
+// Internal protocol prefixes - hidden from consumers
+private const val HANDSHAKE_PREFIX = "_PN_HS_"
+private const val HANDSHAKE_HELLO = "${HANDSHAKE_PREFIX}HELLO|"
+private const val HANDSHAKE_ACK = "${HANDSHAKE_PREFIX}ACK|"
 
 @OptIn(ExperimentalForeignApi::class)
 internal actual suspend fun <T> withPeerNetConnectionImpl(
@@ -51,9 +56,20 @@ internal actual suspend fun <T> withPeerNetConnectionImpl(
 
 private fun currentTimeMillis(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
 
-// Network byte order conversion
 private fun htons(value: UShort): UShort =
     ((value.toInt() and 0xFF) shl 8 or (value.toInt() shr 8 and 0xFF)).toUShort()
+
+/**
+ * Tracks the state of a discovered peer through the handshake process.
+ */
+private data class PeerState(
+    val info: PeerInfo,
+    var weSeeThemViaDiscovery: Boolean = false,
+    var weSentHello: Boolean = false,
+    var theyAckedUs: Boolean = false,
+    var weAckedThem: Boolean = false,
+    var isJoined: Boolean = false
+)
 
 @OptIn(ExperimentalForeignApi::class)
 private class IosPeerNetConnectionImpl(
@@ -62,42 +78,57 @@ private class IosPeerNetConnectionImpl(
     private val incoming: Channel<PeerMessage>,
     private val scope: CoroutineScope
 ) {
-    // Service type format matching UdpTransport.ios.kt
     private val serviceType = "_${config.serviceName}._udp."
-    private val discoveredPeers = mutableMapOf<String, PeerInfo>()
+    private val peerStates = mutableMapOf<String, PeerState>()
 
     private var netService: NSNetService? = null
     private var netServiceBrowser: NSNetServiceBrowser? = null
     private var browserDelegate: NetServiceBrowserDelegate? = null
     private var publishDelegate: NetServicePublishDelegate? = null
-    private val pendingServices = mutableListOf<NSNetService>()
     private val resolverDelegates = mutableListOf<NetServiceResolveDelegate>()
 
     private var udpSocket: Int = -1
     private var receiveJob: Job? = null
+    private var handshakeJob: Job? = null
     private var localAddress: String = "0.0.0.0"
 
     suspend fun start() {
-        println("[iOS-$peerId] Starting peer discovery")
+        NSLog("[PeerNet-$peerId] Starting peer discovery")
         localAddress = getLocalIpAddress()
-        println("[iOS-$peerId] Local IP: $localAddress")
+        NSLog("[PeerNet-$peerId] Local IP: $localAddress")
 
-        // Create UDP socket for messaging
         createUdpSocket()
 
-        // Start Bonjour on main thread (critical for delegates to work!)
         withContext(Dispatchers.Main) {
             startBonjour()
+        }
+
+        // Periodic handshake maintenance and run loop processing
+        handshakeJob = scope.launch {
+            while (isActive) {
+                // Process run loop to let Bonjour callbacks fire
+                withContext(Dispatchers.Main) {
+                    NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.01))
+                }
+
+                delay(100)
+
+                peerStates.values.toList().forEach { state ->
+                    if (state.weSeeThemViaDiscovery && !state.isJoined) {
+                        sendHandshakeHello(state.info)
+                        state.weSentHello = true
+                    }
+                }
+            }
         }
     }
 
     private fun createUdpSocket() {
         udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         if (udpSocket < 0) {
-            println("[iOS-$peerId] Failed to create UDP socket: ${posix_errno()}")
+            NSLog("[PeerNet-$peerId] Failed to create UDP socket")
             return
         }
-        println("[iOS-$peerId] Created UDP socket: $udpSocket")
 
         memScoped {
             val reuseAddr = alloc<IntVar>()
@@ -112,21 +143,18 @@ private class IosPeerNetConnectionImpl(
 
             val bindResult = bind(udpSocket, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
             if (bindResult < 0) {
-                println("[iOS-$peerId] Failed to bind UDP socket: ${posix_errno()}")
+                NSLog("[PeerNet-$peerId] Failed to bind UDP socket")
                 close(udpSocket)
                 udpSocket = -1
                 return
             }
-            println("[iOS-$peerId] UDP socket bound to port $MESSAGE_PORT")
         }
 
-        // Set non-blocking
         val flags = fcntl(udpSocket, F_GETFL, 0)
         fcntl(udpSocket, F_SETFL, flags or O_NONBLOCK)
 
-        println("[iOS-$peerId] Listening for messages on port $MESSAGE_PORT")
+        NSLog("[PeerNet-$peerId] Listening on port $MESSAGE_PORT")
 
-        // Start receive loop
         receiveJob = scope.launch(Dispatchers.Default) {
             receiveLoop()
         }
@@ -134,9 +162,14 @@ private class IosPeerNetConnectionImpl(
 
     private suspend fun receiveLoop() {
         val buffer = ByteArray(4096)
-        println("[iOS-$peerId] UDP receive loop started")
+        var loopCount = 0
 
         while (scope.isActive && udpSocket >= 0) {
+            loopCount++
+            if (loopCount % 100 == 0) {
+                NSLog("[PeerNet-$peerId] Receive loop iteration $loopCount, socket=$udpSocket")
+            }
+
             memScoped {
                 val senderAddr = alloc<sockaddr_in>()
                 val addrLen = alloc<UIntVar>()
@@ -153,14 +186,37 @@ private class IosPeerNetConnectionImpl(
                     )
 
                     if (bytesRead > 0) {
-                        val data = buffer.copyOf(bytesRead.toInt())
                         val senderIp = inet_ntoa(senderAddr.sin_addr.readValue())?.toKString() ?: "unknown"
+                        val data = buffer.copyOf(bytesRead.toInt())
+                        val message = data.decodeToString()
+                        NSLog("[PeerNet-$peerId] Received $bytesRead bytes from $senderIp: ${message.take(50)}...")
 
-                        // Find peer by address
-                        val fromPeer = discoveredPeers.values.find { it.address == senderIp }
-                        if (fromPeer != null) {
-                            scope.launch {
-                                incoming.send(PeerMessage.Data(fromPeer.id, data))
+                        // Parse: "senderId:payload"
+                        val separatorIndex = message.indexOf(':')
+                        if (separatorIndex > 0) {
+                            val fromPeerId = message.substring(0, separatorIndex)
+                            NSLog("[PeerNet-$peerId] Parsed fromPeerId=$fromPeerId, myPeerId=$peerId")
+                            if (fromPeerId != peerId) {
+                                val payload = message.substring(separatorIndex + 1)
+                                NSLog("[PeerNet-$peerId] Payload starts with: ${payload.take(30)}")
+
+                                when {
+                                    payload.startsWith(HANDSHAKE_HELLO) -> {
+                                        handleHelloReceived(fromPeerId, payload, senderIp)
+                                    }
+                                    payload.startsWith(HANDSHAKE_ACK) -> {
+                                        handleAckReceived(fromPeerId)
+                                    }
+                                    else -> {
+                                        // Application data
+                                        val state = peerStates[fromPeerId]
+                                        if (state?.isJoined == true) {
+                                            scope.launch {
+                                                incoming.send(PeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -168,13 +224,52 @@ private class IosPeerNetConnectionImpl(
             }
             delay(10)
         }
-        println("[iOS-$peerId] UDP receive loop ended")
+    }
+
+    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String) {
+        val helloData = payload.removePrefix(HANDSHAKE_HELLO)
+        val parts = helloData.split("|")
+        val pName = parts.getOrNull(0) ?: "Unknown"
+        val pAddr = parts.getOrNull(2) ?: fromAddress
+        val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+        val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
+
+        val state = peerStates.getOrPut(fromPeerId) {
+            NSLog("[PeerNet-$peerId] Received HELLO from new peer: $pName ($fromPeerId) at $pAddr:$pPort")
+            PeerState(info = peerInfo)
+        }
+        state.weSeeThemViaDiscovery = true
+
+        if (!state.weAckedThem) {
+            sendHandshakeAck(peerInfo)
+            state.weAckedThem = true
+        }
+
+        checkAndEmitJoined(state)
+    }
+
+    private fun handleAckReceived(fromPeerId: String) {
+        val state = peerStates[fromPeerId] ?: return
+        NSLog("[PeerNet-$peerId] Received ACK from: $fromPeerId")
+        state.theyAckedUs = true
+        checkAndEmitJoined(state)
+    }
+
+    private fun checkAndEmitJoined(state: PeerState) {
+        if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
+            state.isJoined = true
+            NSLog("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
+            scope.launch {
+                incoming.send(PeerMessage.Event.Joined(state.info))
+            }
+        }
     }
 
     private fun startBonjour() {
-        // Service name format: displayName|peerId|address (matching UdpTransport)
-        val serviceName = "${config.displayName}|$peerId|$localAddress"
-        println("[iOS-$peerId] Creating Bonjour service: $serviceName, type: $serviceType, port: $MESSAGE_PORT")
+        val serviceName = "${config.displayName}|$peerId|$localAddress|$MESSAGE_PORT"
+        NSLog("[PeerNet-$peerId] Registering service: $serviceName")
+        NSLog("[PeerNet-$peerId] Service type: $serviceType")
 
         publishDelegate = NetServicePublishDelegate(peerId)
 
@@ -185,21 +280,17 @@ private class IosPeerNetConnectionImpl(
             port = MESSAGE_PORT
         )
         netService?.delegate = publishDelegate
+        NSLog("[PeerNet-$peerId] Calling publish()...")
         netService?.publish()
-        println("[iOS-$peerId] Bonjour service publish() called")
-
-        // Schedule on run loop AFTER publish (important!)
         netService?.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+        NSLog("[PeerNet-$peerId] Service scheduled in run loop")
 
-        // Browse for services
         browserDelegate = NetServiceBrowserDelegate(
             peerId = peerId,
             onServiceFound = { service ->
-                println("[iOS-$peerId] Bonjour found service: ${service.name}")
-                pendingServices.add(service)
-                // Create a delegate for resolution and keep strong reference
+                NSLog("[PeerNet-$peerId] Found service: ${service.name}")
                 val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
-                    handleResolvedService(resolvedService)
+                    handleServiceResolved(resolvedService)
                 }
                 resolverDelegates.add(resolveDelegate)
                 service.delegate = resolveDelegate
@@ -210,54 +301,66 @@ private class IosPeerNetConnectionImpl(
         netServiceBrowser = NSNetServiceBrowser()
         netServiceBrowser?.delegate = browserDelegate
         netServiceBrowser?.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+        NSLog("[PeerNet-$peerId] Starting browser search for type: $serviceType")
         netServiceBrowser?.searchForServicesOfType(serviceType, inDomain = "local.")
-        println("[iOS-$peerId] Bonjour browser started for type: $serviceType in domain: local.")
+        NSLog("[PeerNet-$peerId] Bonjour setup complete")
     }
 
-    private fun handleResolvedService(service: NSNetService) {
+    private fun handleServiceResolved(service: NSNetService) {
         val serviceName = service.name
-        println("[iOS-$peerId] Bonjour service resolved: $serviceName")
-
         val parts = serviceName.split("|")
         if (parts.size >= 3) {
             val peerName = parts[0]
             val pId = parts[1]
             val peerAddr = parts[2]
+            val peerPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
 
-            if (pId != peerId && !discoveredPeers.containsKey(pId)) {
-                println("[iOS-$peerId] Found peer via Bonjour: $peerName ($pId) at $peerAddr")
-                val peerInfo = PeerInfo(
-                    id = pId,
-                    name = peerName,
-                    address = peerAddr,
-                    port = MESSAGE_PORT
-                )
-                discoveredPeers[pId] = peerInfo
+            if (pId == peerId) return
 
-                scope.launch {
-                    incoming.send(PeerMessage.Event.Discovered(peerInfo))
-                }
+            val peerInfo = PeerInfo(id = pId, name = peerName, address = peerAddr, port = peerPort)
+
+            val state = peerStates.getOrPut(pId) {
+                NSLog("[PeerNet-$peerId] Discovered via mDNS: $peerName ($pId) at $peerAddr:$peerPort")
+                PeerState(info = peerInfo)
             }
+            state.weSeeThemViaDiscovery = true
+
+            // Send HELLO
+            sendHandshakeHello(peerInfo)
+            state.weSentHello = true
         }
+    }
+
+    private fun sendHandshakeHello(peer: PeerInfo) {
+        val payload = "$HANDSHAKE_HELLO${config.displayName}|$peerId|$localAddress|$MESSAGE_PORT"
+        NSLog("[PeerNet-$peerId] Sending HELLO to ${peer.name} at ${peer.address}:${peer.port}")
+        sendUdp(peer.address, peer.port, "$peerId:$payload")
+    }
+
+    private fun sendHandshakeAck(peer: PeerInfo) {
+        val payload = "$HANDSHAKE_ACK$peerId"
+        sendUdp(peer.address, peer.port, "$peerId:$payload")
     }
 
     fun handleCommand(command: PeerCommand) {
         when (command) {
             is PeerCommand.SendTo -> {
-                val peer = discoveredPeers[command.peerId]
-                if (peer != null) {
-                    sendUdp(peer.address, peer.port, command.payload)
+                val state = peerStates[command.peerId]
+                if (state?.isJoined == true) {
+                    val payload = "$peerId:${command.payload.decodeToString()}"
+                    sendUdp(state.info.address, state.info.port, payload)
                 }
             }
             is PeerCommand.Broadcast -> {
-                discoveredPeers.values.forEach { peer ->
-                    sendUdp(peer.address, peer.port, command.payload)
+                peerStates.values.filter { it.isJoined }.forEach { state ->
+                    val payload = "$peerId:${command.payload.decodeToString()}"
+                    sendUdp(state.info.address, state.info.port, payload)
                 }
             }
         }
     }
 
-    private fun sendUdp(address: String, port: Int, data: ByteArray) {
+    private fun sendUdp(address: String, port: Int, message: String) {
         memScoped {
             val sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
             if (sendSocket < 0) return
@@ -267,6 +370,7 @@ private class IosPeerNetConnectionImpl(
             destAddr.sin_port = htons(port.toUShort())
             inet_pton(AF_INET, address, destAddr.sin_addr.ptr)
 
+            val data = message.encodeToByteArray()
             data.usePinned { pinned ->
                 sendto(
                     sendSocket,
@@ -283,8 +387,9 @@ private class IosPeerNetConnectionImpl(
     }
 
     suspend fun stop() {
-        println("[iOS-$peerId] Stopping peer discovery")
+        NSLog("[PeerNet-$peerId] Stopping")
         receiveJob?.cancel()
+        handshakeJob?.cancel()
         if (udpSocket >= 0) {
             close(udpSocket)
             udpSocket = -1
@@ -301,7 +406,6 @@ private class IosPeerNetConnectionImpl(
             if (getifaddrs(ifaddrs.ptr) == 0) {
                 var current = ifaddrs.value
                 var wifiIp: String? = null
-                var cellularIp: String? = null
                 var otherIp: String? = null
 
                 while (current != null) {
@@ -309,21 +413,14 @@ private class IosPeerNetConnectionImpl(
                     if (addr.ifa_addr != null && addr.ifa_addr!!.pointed.sa_family == AF_INET.toUByte()) {
                         val name = addr.ifa_name?.toKString() ?: ""
                         val sockaddr = addr.ifa_addr!!.reinterpret<sockaddr_in>()
-                        val inAddr = sockaddr.pointed.sin_addr.readValue()
-                        val ip = inet_ntoa(inAddr)?.toKString()
+                        val ip = inet_ntoa(sockaddr.pointed.sin_addr.readValue())?.toKString()
 
-                        println("[iOS-$peerId] Found interface $name with IP $ip")
-
-                        if (ip != null && !ip.startsWith("127.") && !ip.startsWith("169.254.") && !ip.startsWith("192.0.0.")) {
+                        if (ip != null && !ip.startsWith("127.") && !ip.startsWith("169.254.") &&
+                            !ip.startsWith("100.64.") && !ip.startsWith("100.96.")) {
                             when {
-                                // en0 is WiFi on iOS
-                                name == "en0" -> wifiIp = ip
-                                // bridge100 is hotspot interface (when connected TO a hotspot)
-                                name == "bridge100" -> wifiIp = ip
-                                // pdp_ip is cellular
-                                name.startsWith("pdp_ip") -> cellularIp = ip
-                                // Other interfaces (skip ipsec)
-                                !name.startsWith("ipsec") -> if (otherIp == null) otherIp = ip
+                                name == "en0" || name == "bridge100" -> wifiIp = ip
+                                !name.startsWith("pdp_ip") && !name.startsWith("ipsec") &&
+                                !name.startsWith("utun") -> otherIp = otherIp ?: ip
                             }
                         }
                     }
@@ -331,60 +428,51 @@ private class IosPeerNetConnectionImpl(
                 }
                 freeifaddrs(ifaddrs.value)
 
-                // Prefer WiFi, then other, then cellular
-                val selectedIp = wifiIp ?: otherIp ?: cellularIp
-                if (selectedIp != null) {
-                    println("[iOS-$peerId] Selected IP $selectedIp (wifi=$wifiIp, cellular=$cellularIp, other=$otherIp)")
-                    return selectedIp
-                }
+                return wifiIp ?: otherIp ?: "0.0.0.0"
             }
         }
         return "0.0.0.0"
     }
 }
 
-// Delegate for browsing - matching UdpTransport.ios.kt
+// Delegate classes
 private class NetServiceBrowserDelegate(
     private val peerId: String,
     private val onServiceFound: (NSNetService) -> Unit
 ) : NSObject(), NSNetServiceBrowserDelegateProtocol {
 
     override fun netServiceBrowser(browser: NSNetServiceBrowser, didFindService: NSNetService, moreComing: Boolean) {
-        println("[iOS-$peerId] Bonjour browser didFindService: ${didFindService.name}, moreComing: $moreComing")
-        // Filter out our own service
+        NSLog("[PeerNet-$peerId] Browser found service: ${didFindService.name}, moreComing=$moreComing")
         if (!didFindService.name.contains(peerId)) {
             onServiceFound(didFindService)
         } else {
-            println("[iOS-$peerId] Filtered out own service")
+            NSLog("[PeerNet-$peerId] Ignoring own service")
         }
     }
 
     override fun netServiceBrowser(browser: NSNetServiceBrowser, didNotSearch: Map<Any?, *>) {
-        println("[iOS-$peerId] Bonjour browser did not search: $didNotSearch")
+        NSLog("[PeerNet-$peerId] Browser did not search: $didNotSearch")
     }
 
     override fun netServiceBrowserWillSearch(browser: NSNetServiceBrowser) {
-        println("[iOS-$peerId] Bonjour browser will search")
+        NSLog("[PeerNet-$peerId] Browser will search")
     }
 
     override fun netServiceBrowserDidStopSearch(browser: NSNetServiceBrowser) {
-        println("[iOS-$peerId] Bonjour browser did stop search")
+        NSLog("[PeerNet-$peerId] Browser stopped search")
     }
 }
 
-// Delegate for publishing
 private class NetServicePublishDelegate(private val peerId: String) : NSObject(), NSNetServiceDelegateProtocol {
-
     override fun netServiceDidPublish(sender: NSNetService) {
-        println("[iOS-$peerId] Bonjour service published successfully: ${sender.name}")
+        NSLog("[PeerNet-$peerId] Service published: ${sender.name}")
     }
 
     override fun netService(sender: NSNetService, didNotPublish: Map<Any?, *>) {
-        println("[iOS-$peerId] Bonjour service did NOT publish: ${sender.name} - $didNotPublish")
+        NSLog("[PeerNet-$peerId] Service did NOT publish: $didNotPublish")
     }
 }
 
-// Delegate for resolving
 private class NetServiceResolveDelegate(
     private val peerId: String,
     private val onResolved: (NSNetService) -> Unit
@@ -395,6 +483,6 @@ private class NetServiceResolveDelegate(
     }
 
     override fun netService(sender: NSNetService, didNotResolve: Map<Any?, *>) {
-        println("[iOS-$peerId] Bonjour service did not resolve: ${sender.name} - $didNotResolve")
+        NSLog("[PeerNet-$peerId] Service did not resolve: $didNotResolve")
     }
 }

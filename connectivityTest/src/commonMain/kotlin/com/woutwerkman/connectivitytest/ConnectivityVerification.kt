@@ -26,11 +26,9 @@ enum class TestPlatform {
 
         fun fromPeerId(peerId: String): TestPlatform? = when {
             peerId.startsWith("jvm-") -> JVM
-            peerId.startsWith("android-") -> ANDROID_SIMULATOR // Could be either, treating as simulator
-            peerId.startsWith("ios-") -> IOS_REAL_DEVICE // Could be either, treating as real device
-            // If peer ID doesn't match any known pattern, assume it's from iOS
-            // (the old UdpTransport code uses random names without platform prefix)
-            else -> IOS_REAL_DEVICE
+            peerId.startsWith("android-") -> ANDROID_SIMULATOR
+            peerId.startsWith("ios-") -> IOS_REAL_DEVICE
+            else -> null
         }
     }
 }
@@ -41,8 +39,7 @@ enum class TestPlatform {
 data class ConnectivityTestConfig(
     val instanceId: String,
     val targetPlatforms: Set<TestPlatform>,
-    val discoveryTimeoutMs: Long = 30_000,
-    val testTimeoutMs: Long = 60_000
+    val timeoutMs: Long = 30_000  // 30 seconds to allow time for iOS Local Network permission
 )
 
 /**
@@ -56,31 +53,30 @@ sealed class ConnectivityTestResult {
 /**
  * Runs the connectivity verification test.
  *
- * This test:
- * 1. Starts peer discovery
- * 2. Waits to discover peers from the expected platforms
- * 3. Verifies that we can see all expected peer types
+ * This test verifies bidirectional connectivity by waiting for Joined events.
+ * PeerNetConnection only emits Joined when both sides have confirmed they can see each other,
+ * so receiving a Joined event means bidirectional connectivity is working.
  *
- * @throws Exception if connectivity test fails
+ * Test passes when we receive Joined events from all expected platforms.
  */
 suspend fun runConnectivityTest(config: ConnectivityTestConfig): ConnectivityTestResult {
     println("[${config.instanceId}] Starting connectivity test")
     println("[${config.instanceId}] Looking for platforms: ${config.targetPlatforms}")
 
     return try {
-        withTimeout(config.testTimeoutMs) {
+        withTimeout(config.timeoutMs) {
             withPeerNetConnection(
                 PeerNetConfig(
-                    serviceName = "chippy",
+                    serviceName = "chippytest",
                     displayName = config.instanceId,
-                    discoveryTimeoutMs = config.discoveryTimeoutMs
+                    discoveryTimeoutMs = config.timeoutMs
                 )
             ) { connection ->
                 verifyConnectivity(config, connection)
             }
         }
     } catch (e: TimeoutCancellationException) {
-        ConnectivityTestResult.Failure("Test timed out after ${config.testTimeoutMs}ms", e)
+        ConnectivityTestResult.Failure("Test timed out after ${config.timeoutMs}ms", e)
     } catch (e: Exception) {
         ConnectivityTestResult.Failure("Test failed: ${e.message}", e)
     }
@@ -90,27 +86,13 @@ private suspend fun CoroutineScope.verifyConnectivity(
     config: ConnectivityTestConfig,
     connection: PeerNetConnection
 ): ConnectivityTestResult {
-    val discoveredPeers = mutableMapOf<String, PeerInfo>()
-    val discoveredPlatforms = mutableSetOf<TestPlatform>()
+    // Track which platforms we've received Joined events from
+    val joinedPlatforms = mutableSetOf<TestPlatform>()
 
-    // We need to discover at least one peer from each target platform (excluding our own)
-    // Since we run 2 instances per platform, we should see at least 1 other instance of our own platform
-    // plus instances from other platforms
-
-    val expectedPeerCount = config.targetPlatforms.size * 2 - 1 // Total instances minus ourselves
-    println("[${config.instanceId}] Expecting to discover at least $expectedPeerCount peers")
-
-    val startTime = System.currentTimeMillis()
-    val discoveryTimeout = config.discoveryTimeoutMs
+    println("[${config.instanceId}] Waiting for Joined events from: ${config.targetPlatforms}")
 
     try {
         while (isActive) {
-            val elapsed = System.currentTimeMillis() - startTime
-            if (elapsed > discoveryTimeout) {
-                break
-            }
-
-            // Use withTimeoutOrNull to avoid blocking forever
             val message = withTimeoutOrNull(1000) {
                 try {
                     connection.incoming.receive()
@@ -120,70 +102,66 @@ private suspend fun CoroutineScope.verifyConnectivity(
             }
 
             when (message) {
-                is PeerMessage.Event.Discovered -> {
+                is PeerMessage.Event.Joined -> {
                     val peer = message.peer
-                    println("[${config.instanceId}] Discovered peer: ${peer.name} (${peer.id}) at ${peer.address}")
-                    discoveredPeers[peer.id] = peer
+                    println("[${config.instanceId}] Peer JOINED: ${peer.name} (${peer.id}) at ${peer.address}")
 
-                    // Determine platform from peer ID prefix
                     val platform = TestPlatform.fromPeerId(peer.id)
-
                     if (platform != null) {
-                        // Check if this platform or a compatible one is in target platforms
-                        // iOS real device and simulator are treated as compatible
-                        val matchingPlatform = when (platform) {
-                            TestPlatform.IOS_REAL_DEVICE ->
-                                if (TestPlatform.IOS_REAL_DEVICE in config.targetPlatforms) TestPlatform.IOS_REAL_DEVICE
-                                else if (TestPlatform.IOS_SIMULATOR in config.targetPlatforms) TestPlatform.IOS_SIMULATOR
-                                else null
-                            TestPlatform.IOS_SIMULATOR ->
-                                if (TestPlatform.IOS_SIMULATOR in config.targetPlatforms) TestPlatform.IOS_SIMULATOR
-                                else if (TestPlatform.IOS_REAL_DEVICE in config.targetPlatforms) TestPlatform.IOS_REAL_DEVICE
-                                else null
-                            else -> if (platform in config.targetPlatforms) platform else null
-                        }
+                        val normalizedPlatform = normalizePlatform(platform, config.targetPlatforms)
+                        if (normalizedPlatform != null) {
+                            joinedPlatforms.add(normalizedPlatform)
+                            println("[${config.instanceId}] Platform joined: $normalizedPlatform (${joinedPlatforms.size}/${config.targetPlatforms.size})")
 
-                        if (matchingPlatform != null) {
-                            discoveredPlatforms.add(matchingPlatform)
-                            println("[${config.instanceId}] Discovered platform: $matchingPlatform (${discoveredPlatforms.size}/${config.targetPlatforms.size})")
+                            // Check if we have all platforms
+                            if (joinedPlatforms.containsAll(config.targetPlatforms)) {
+                                println("[${config.instanceId}] SUCCESS: All platforms connected!")
+                                return ConnectivityTestResult.Success
+                            }
                         }
-                    }
-
-                    // Check if we've discovered all target platforms
-                    if (discoveredPlatforms.containsAll(config.targetPlatforms)) {
-                        println("[${config.instanceId}] All target platforms discovered!")
-                        return ConnectivityTestResult.Success
                     }
                 }
 
-                is PeerMessage.Event.Lost -> {
-                    println("[${config.instanceId}] Lost peer: ${message.peerId}")
-                    discoveredPeers.remove(message.peerId)
+                is PeerMessage.Event.Left -> {
+                    println("[${config.instanceId}] Peer left: ${message.peerId}")
                 }
 
-                is PeerMessage.Data -> {
-                    println("[${config.instanceId}] Received data from ${message.fromPeerId}: ${message.payload.size} bytes")
+                is PeerMessage.Received -> {
+                    println("[${config.instanceId}] Received data from ${message.fromPeerId}")
                 }
 
                 null -> {
-                    // Timeout, continue loop
+                    // Timeout, continue waiting
                 }
             }
         }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        return ConnectivityTestResult.Failure("Error during discovery: ${e.message}", e)
+        return ConnectivityTestResult.Failure("Error during test: ${e.message}", e)
     }
 
-    // Check results
-    val missingPlatforms = config.targetPlatforms - discoveredPlatforms
-    return if (missingPlatforms.isEmpty()) {
-        ConnectivityTestResult.Success
-    } else {
-        ConnectivityTestResult.Failure(
-            "Failed to discover all platforms. Missing: $missingPlatforms. " +
-                    "Discovered ${discoveredPeers.size} peers from platforms: $discoveredPlatforms"
-        )
-    }
+    val missingPlatforms = config.targetPlatforms - joinedPlatforms
+    return ConnectivityTestResult.Failure(
+        "Failed to connect to all platforms. Missing: $missingPlatforms. Connected: $joinedPlatforms"
+    )
 }
+
+/**
+ * Normalize iOS platform variants (real device vs simulator).
+ */
+private fun normalizePlatform(platform: TestPlatform, targets: Set<TestPlatform>): TestPlatform? {
+    if (platform in targets) return platform
+
+    // iOS variants are compatible
+    if (platform == TestPlatform.IOS_REAL_DEVICE && TestPlatform.IOS_SIMULATOR in targets) {
+        return TestPlatform.IOS_SIMULATOR
+    }
+    if (platform == TestPlatform.IOS_SIMULATOR && TestPlatform.IOS_REAL_DEVICE in targets) {
+        return TestPlatform.IOS_REAL_DEVICE
+    }
+
+    return null
+}
+
+internal expect fun currentTimeMillis(): Long

@@ -14,7 +14,7 @@ import kotlinx.serialization.Serializable
  * Contains only shared/public data visible to all peers.
  */
 data class PeerNetState(
-    val discoveredPeers: Map<String, PeerInfo> = emptyMap(),
+    val discoveredPeers: Map<String, PeerInfo>,
 )
 
 /**

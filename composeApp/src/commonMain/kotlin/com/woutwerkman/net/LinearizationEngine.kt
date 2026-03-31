@@ -57,7 +57,7 @@ internal class LinearizationEngine(
 ) {
     val localPeerId: String get() = raw.localPeerId
 
-    private val _state = MutableStateFlow(PeerNetState())
+    private val _state = MutableStateFlow(PeerNetState(emptyMap()))
     val state: StateFlow<PeerNetState> = _state.asStateFlow()
 
     // All known events, kept sorted by (timestamp, peerId)

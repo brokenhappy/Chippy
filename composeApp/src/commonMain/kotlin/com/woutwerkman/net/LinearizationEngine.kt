@@ -1,10 +1,9 @@
 package com.woutwerkman.net
 
 import com.woutwerkman.currentTimeMillis
+import com.woutwerkman.game.model.GamePhase
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
-import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,11 +14,7 @@ import kotlinx.serialization.json.Json
 // Internal protocol prefix — distinct from the handshake prefix (_PN_HS_)
 private const val LIN_PREFIX = "_PN_LIN_"
 private const val LIN_EVENT = "${LIN_PREFIX}EVENT|"
-private const val LIN_STATE_REQ = "${LIN_PREFIX}STATE_REQ"
 private const val LIN_STATE_RESP = "${LIN_PREFIX}STATE_RESP|"
-private const val LIN_RELAY = "${LIN_PREFIX}RELAY|"
-private const val LIN_RELAY_TO = "${LIN_PREFIX}RELAY_TO|"
-private const val MAX_RELAY_IDS = 2000
 
 private val json = Json {
     ignoreUnknownKeys = true
@@ -57,24 +52,18 @@ internal class LinearizationEngine(
 ) {
     val localPeerId: String get() = raw.localPeerId
 
-    private val _state = MutableStateFlow(PeerNetState(emptyMap()))
+    private val _state = MutableStateFlow(PeerNetState())
     val state: StateFlow<PeerNetState> = _state.asStateFlow()
 
     // All known events, kept sorted by (timestamp, peerId)
     private val events = mutableListOf<TimestampedEvent>()
 
-    // App-level message relay with gossip
-    private val _appMessages = Channel<AppMessage>(Channel.BUFFERED)
-    val appMessages: ReceiveChannel<AppMessage> get() = _appMessages
-    private val seenRelayIds = LinkedHashSet<String>()
-    private var relayCounter = 0L
+    // Peers we've seen at the raw level (for periodic state sync)
+    private val connectedPeerIds = mutableSetOf<String>()
 
     /**
      * Start the engine loops. Suspends until cancelled.
      */
-    // Peers we've seen at the raw level (for periodic state sync)
-    private val connectedPeerIds = mutableSetOf<String>()
-
     suspend fun start() {
         // Commit our own Joined event
         val selfInfo = PeerInfo(id = localPeerId, name = displayName, address = "", port = 0)
@@ -97,22 +86,6 @@ internal class LinearizationEngine(
         addEvent(timestamped)
         broadcastEvent(timestamped)
         return true
-    }
-
-    /** Broadcast an app message to all peers via gossip relay. */
-    suspend fun relayBroadcast(payload: String) {
-        val relayId = "${localPeerId}-${clock()}-${relayCounter++}"
-        seenRelayIds.add(relayId)
-        trimRelayIds()
-        broadcastRaw("$LIN_RELAY$relayId|$localPeerId|$payload")
-    }
-
-    /** Send an app message to a specific peer via gossip relay. */
-    suspend fun relayTo(targetPeerId: String, payload: String) {
-        val relayId = "${localPeerId}-${clock()}-${relayCounter++}"
-        seenRelayIds.add(relayId)
-        trimRelayIds()
-        broadcastRaw("$LIN_RELAY_TO$targetPeerId|$relayId|$localPeerId|$payload")
     }
 
     private suspend fun processIncoming() {
@@ -172,10 +145,7 @@ internal class LinearizationEngine(
     private suspend fun handleRawReceived(fromPeerId: String, payload: String) {
         when {
             payload.startsWith(LIN_EVENT) -> gossipEvent(payload.removePrefix(LIN_EVENT))
-            payload == LIN_STATE_REQ -> sendStateTo(fromPeerId)
             payload.startsWith(LIN_STATE_RESP) -> gossipStateResp(payload.removePrefix(LIN_STATE_RESP))
-            payload.startsWith(LIN_RELAY_TO) -> handleRelayTo(payload.removePrefix(LIN_RELAY_TO))
-            payload.startsWith(LIN_RELAY) -> handleRelay(payload.removePrefix(LIN_RELAY))
         }
     }
 
@@ -213,48 +183,6 @@ internal class LinearizationEngine(
         }
     }
 
-    /** Handle a broadcast relay message: deliver locally and re-gossip. */
-    private suspend fun handleRelay(data: String) {
-        val parts = data.split("|", limit = 3)
-        if (parts.size < 3) return
-        val relayId = parts[0]
-        val originPeerId = parts[1]
-        val payload = parts[2]
-
-        if (!seenRelayIds.add(relayId)) return
-        trimRelayIds()
-
-        _appMessages.trySend(AppMessage(originPeerId, payload))
-        broadcastRaw("$LIN_RELAY$data")
-    }
-
-    /** Handle a targeted relay message: deliver only if we're the target, always re-gossip. */
-    private suspend fun handleRelayTo(data: String) {
-        val parts = data.split("|", limit = 4)
-        if (parts.size < 4) return
-        val targetPeerId = parts[0]
-        val relayId = parts[1]
-        val originPeerId = parts[2]
-        val payload = parts[3]
-
-        if (!seenRelayIds.add(relayId)) return
-        trimRelayIds()
-
-        if (targetPeerId == localPeerId) {
-            _appMessages.trySend(AppMessage(originPeerId, payload))
-        }
-
-        broadcastRaw("$LIN_RELAY_TO$data")
-    }
-
-    private fun trimRelayIds() {
-        while (seenRelayIds.size > MAX_RELAY_IDS) {
-            val iter = seenRelayIds.iterator()
-            iter.next()
-            iter.remove()
-        }
-    }
-
     /** Add event if new. Returns true if it was new, false if duplicate. */
     private fun addEvent(event: TimestampedEvent): Boolean {
         if (events.any { it.timestamp == event.timestamp && it.peerId == event.peerId && it.serializedEvent == event.serializedEvent }) {
@@ -270,8 +198,18 @@ internal class LinearizationEngine(
         _state.value = foldState()
     }
 
+    /**
+     * Fold all events into the current state.
+     * Deterministic: same events in same order → same state on all peers.
+     */
     private fun foldState(): PeerNetState {
         var peers = mapOf<String, PeerInfo>()
+        var pendingInvites = listOf<Invite>()
+        var lobby: LobbyInfo? = null
+        var gamePhase = GamePhase.WAITING
+        var playerValues = mapOf<String, Int>()
+        var votes = mapOf<String, com.woutwerkman.game.model.VoteChoice>()
+
         for (timestamped in events) {
             val event = try {
                 json.decodeFromString<PeerEvent>(timestamped.serializedEvent)
@@ -279,11 +217,125 @@ internal class LinearizationEngine(
                 continue
             }
             when (event) {
-                is PeerEvent.Joined -> peers = peers + (event.peer.id to event.peer)
-                is PeerEvent.Left -> peers = peers - event.peerId
+                is PeerEvent.Joined -> {
+                    peers = peers + (event.peer.id to event.peer)
+                }
+                is PeerEvent.Left -> {
+                    peers = peers - event.peerId
+                    // Clean up invites involving this peer
+                    pendingInvites = pendingInvites.filter { it.fromId != event.peerId && it.toId != event.peerId }
+                    // Remove from lobby if in one
+                    lobby = lobby?.let { l ->
+                        val updated = l.copy(players = l.players - event.peerId)
+                        if (updated.players.isEmpty()) null else updated
+                    }
+                }
+
+                is PeerEvent.InviteSent -> {
+                    // Only add if not already pending
+                    if (pendingInvites.none { it.fromId == event.fromId && it.toId == event.toId }) {
+                        pendingInvites = pendingInvites + Invite(event.fromId, event.toId)
+                    }
+                }
+                is PeerEvent.InviteAccepted -> {
+                    // Remove the invite
+                    pendingInvites = pendingInvites.filter {
+                        !(it.fromId == event.fromId && it.toId == event.toId)
+                    }
+                    // Create lobby if it doesn't exist, or add both players
+                    val currentLobby = lobby
+                    if (currentLobby == null || currentLobby.lobbyId == event.lobbyId) {
+                        val hostName = peers[event.toId]?.name ?: "Unknown"
+                        val joinerName = peers[event.fromId]?.name ?: "Unknown"
+                        val existingPlayers = currentLobby?.players ?: emptyMap()
+                        lobby = LobbyInfo(
+                            lobbyId = event.lobbyId,
+                            hostId = event.toId,
+                            players = existingPlayers +
+                                    (event.toId to LobbyPlayer(name = hostName)) +
+                                    (event.fromId to LobbyPlayer(name = joinerName)),
+                        )
+                    }
+                }
+                is PeerEvent.InviteRejected -> {
+                    pendingInvites = pendingInvites.filter {
+                        !(it.fromId == event.fromId && it.toId == event.toId)
+                    }
+                }
+
+                is PeerEvent.LobbyCreated -> {
+                    val hostName = peers[event.hostId]?.name ?: "Unknown"
+                    lobby = LobbyInfo(
+                        lobbyId = event.lobbyId,
+                        hostId = event.hostId,
+                        players = mapOf(event.hostId to LobbyPlayer(name = hostName)),
+                    )
+                    gamePhase = GamePhase.WAITING
+                    playerValues = emptyMap()
+                    votes = emptyMap()
+                }
+                is PeerEvent.JoinedLobby -> {
+                    lobby = lobby?.let { l ->
+                        val name = peers[event.playerId]?.name ?: "Unknown"
+                        l.copy(players = l.players + (event.playerId to LobbyPlayer(name = name)))
+                    }
+                }
+                is PeerEvent.LeftLobby -> {
+                    lobby = lobby?.let { l ->
+                        val updated = l.copy(players = l.players - event.playerId)
+                        if (updated.players.isEmpty()) null else updated
+                    }
+                    if (lobby == null) {
+                        gamePhase = GamePhase.WAITING
+                        playerValues = emptyMap()
+                        votes = emptyMap()
+                    }
+                }
+
+                is PeerEvent.ReadyChanged -> {
+                    lobby = lobby?.let { l ->
+                        val player = l.players[event.playerId] ?: return@let l
+                        l.copy(players = l.players + (event.playerId to player.copy(isReady = event.isReady)))
+                    }
+                }
+                is PeerEvent.GameStarted -> {
+                    gamePhase = GamePhase.COUNTDOWN
+                    playerValues = event.playerValues
+                    votes = emptyMap()
+                }
+                is PeerEvent.ButtonPress -> {
+                    val currentValue = playerValues[event.targetId]
+                    if (currentValue != null) {
+                        val newValue = (currentValue + event.delta).coerceIn(-25, 25)
+                        playerValues = playerValues + (event.targetId to newValue)
+                    }
+                }
+                is PeerEvent.PhaseChanged -> {
+                    gamePhase = event.newPhase
+                    if (event.newPhase == GamePhase.WAITING) {
+                        // Reset game state when going back to waiting
+                        playerValues = emptyMap()
+                        votes = emptyMap()
+                        // Reset ready states
+                        lobby = lobby?.let { l ->
+                            l.copy(players = l.players.mapValues { (_, p) -> p.copy(isReady = false) })
+                        }
+                    }
+                }
+                is PeerEvent.VoteCast -> {
+                    votes = votes + (event.playerId to event.choice)
+                }
             }
         }
-        return PeerNetState(discoveredPeers = peers)
+
+        return PeerNetState(
+            discoveredPeers = peers,
+            pendingInvites = pendingInvites,
+            lobby = lobby,
+            gamePhase = gamePhase,
+            playerValues = playerValues,
+            votes = votes,
+        )
     }
 
     private suspend fun broadcastEvent(event: TimestampedEvent) {

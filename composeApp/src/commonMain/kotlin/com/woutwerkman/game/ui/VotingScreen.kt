@@ -15,25 +15,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.woutwerkman.game.model.LobbyState
-import com.woutwerkman.game.model.Vote
 import com.woutwerkman.game.model.VoteChoice
+import com.woutwerkman.net.LobbyPlayer
 
 @Composable
 fun VotingScreen(
-    lobbyState: LobbyState,
-    votes: Map<String, Vote>,
+    lobbyPlayers: Map<String, LobbyPlayer>,
+    votes: Map<String, VoteChoice>,
     localPlayerId: String,
     onVote: (VoteChoice) -> Unit
 ) {
     val hasVoted = votes.containsKey(localPlayerId)
-    val localVote = votes[localPlayerId]?.choice
-    val totalPlayers = lobbyState.players.size
+    val localVote = votes[localPlayerId]
+    val totalPlayers = lobbyPlayers.size
     val totalVotes = votes.size
-    
-    val playAgainVotes = votes.values.count { it.choice == VoteChoice.PLAY_AGAIN }
-    val endLobbyVotes = votes.values.count { it.choice == VoteChoice.END_LOBBY }
-    
+
+    val playAgainVotes = votes.values.count { it == VoteChoice.PLAY_AGAIN }
+    val endLobbyVotes = votes.values.count { it == VoteChoice.END_LOBBY }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -41,41 +40,41 @@ fun VotingScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(modifier = Modifier.height(32.dp))
-        
+
         // Victory message
         Text(
             text = "🎉",
             fontSize = 64.sp
         )
-        
+
         Spacer(modifier = Modifier.height(16.dp))
-        
+
         Text(
             text = "Victory!",
             fontSize = 32.sp,
             fontWeight = FontWeight.Bold,
             color = Color(0xFF4CAF50)
         )
-        
+
         Spacer(modifier = Modifier.height(8.dp))
-        
+
         Text(
             text = "All buttons reached zero!",
             fontSize = 16.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        
+
         Spacer(modifier = Modifier.height(48.dp))
-        
+
         // Voting section
         Text(
             text = "What would you like to do?",
             fontSize = 20.sp,
             fontWeight = FontWeight.SemiBold
         )
-        
+
         Spacer(modifier = Modifier.height(24.dp))
-        
+
         // Vote buttons
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -90,7 +89,7 @@ fun VotingScreen(
                 modifier = Modifier.weight(1f),
                 onClick = { onVote(VoteChoice.PLAY_AGAIN) }
             )
-            
+
             VoteButton(
                 text = "End Lobby",
                 emoji = "🏠",
@@ -101,9 +100,9 @@ fun VotingScreen(
                 onClick = { onVote(VoteChoice.END_LOBBY) }
             )
         }
-        
+
         Spacer(modifier = Modifier.height(32.dp))
-        
+
         // Vote progress
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -120,17 +119,17 @@ fun VotingScreen(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium
                 )
-                
+
                 Spacer(modifier = Modifier.height(12.dp))
-                
+
                 LinearProgressIndicator(
-                    progress = { totalVotes.toFloat() / totalPlayers.toFloat() },
+                    progress = { if (totalPlayers > 0) totalVotes.toFloat() / totalPlayers.toFloat() else 0f },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(8.dp)
                         .clip(RoundedCornerShape(4.dp)),
                 )
-                
+
                 if (totalVotes < totalPlayers) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
@@ -141,9 +140,9 @@ fun VotingScreen(
                 }
             }
         }
-        
+
         Spacer(modifier = Modifier.weight(1f))
-        
+
         // Player vote status
         Text(
             text = "Player Votes",
@@ -151,19 +150,18 @@ fun VotingScreen(
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.align(Alignment.Start)
         )
-        
+
         Spacer(modifier = Modifier.height(8.dp))
-        
+
         Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            lobbyState.players.values.forEach { lobbyPlayer ->
-                val playerVote = votes[lobbyPlayer.player.id]
+            lobbyPlayers.forEach { (playerId, lobbyPlayer) ->
                 PlayerVoteStatus(
-                    playerName = lobbyPlayer.player.name,
-                    isLocalPlayer = lobbyPlayer.player.id == localPlayerId,
-                    vote = playerVote?.choice
+                    playerName = lobbyPlayer.name,
+                    isLocalPlayer = playerId == localPlayerId,
+                    vote = votes[playerId]
                 )
             }
         }
@@ -188,7 +186,7 @@ private fun VoteButton(
         },
         label = "voteButtonBg"
     )
-    
+
     val contentColor by animateColorAsState(
         targetValue = when {
             isSelected -> MaterialTheme.colorScheme.onPrimary
@@ -197,7 +195,7 @@ private fun VoteButton(
         },
         label = "voteButtonContent"
     )
-    
+
     Card(
         modifier = modifier,
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
@@ -215,9 +213,9 @@ private fun VoteButton(
                 text = emoji,
                 fontSize = 32.sp
             )
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             Text(
                 text = text,
                 fontSize = 16.sp,
@@ -225,17 +223,17 @@ private fun VoteButton(
                 color = contentColor,
                 textAlign = TextAlign.Center
             )
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             Text(
                 text = "$voteCount vote${if (voteCount != 1) "s" else ""}",
                 fontSize = 12.sp,
                 color = contentColor.copy(alpha = 0.7f)
             )
-            
+
             Spacer(modifier = Modifier.height(12.dp))
-            
+
             Button(
                 onClick = onClick,
                 enabled = enabled && !isSelected,
@@ -290,9 +288,9 @@ private fun PlayerVoteStatus(
                 fontSize = 14.sp
             )
         }
-        
+
         Spacer(modifier = Modifier.width(12.dp))
-        
+
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(

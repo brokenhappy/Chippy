@@ -16,32 +16,30 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.woutwerkman.game.ConnectedGroup
-import com.woutwerkman.game.model.ConnectionRequest
-import com.woutwerkman.game.model.DiscoveredPeer
-import com.woutwerkman.game.model.Player
+import com.woutwerkman.net.Invite
+import com.woutwerkman.net.PeerInfo
 
 /**
  * Represents a peer with their invite status for unified display
  */
 private data class PeerDisplayInfo(
-    val peer: DiscoveredPeer,
+    val peer: PeerInfo,
     val hasIncomingInvite: Boolean,
     val hasSentInvite: Boolean,
-    val incomingRequest: ConnectionRequest?
+    val incomingInvite: Invite?
 )
 
 @Composable
 fun HomeScreen(
     playerName: String,
-    discoveredPeers: List<DiscoveredPeer>,
-    connectedGroups: List<ConnectedGroup>,
-    pendingRequests: List<ConnectionRequest>,
-    sentInvites: Set<String>,
+    peers: List<PeerInfo>,
+    lobbyPlayers: List<PeerInfo>,
+    incomingInvites: List<Invite>,
+    sentInviteIds: Set<String>,
     onSettingsClick: () -> Unit,
-    onPeerClick: (DiscoveredPeer) -> Unit,
-    onAcceptRequest: (ConnectionRequest) -> Unit,
-    onRejectRequest: (ConnectionRequest) -> Unit,
+    onInvitePeer: (String) -> Unit,
+    onAcceptInvite: (Invite) -> Unit,
+    onRejectInvite: (Invite) -> Unit,
     onEnterLobby: () -> Unit
 ) {
     Column(
@@ -82,8 +80,8 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Connected groups (lobbies)
-        if (connectedGroups.isNotEmpty()) {
+        // Connected groups (lobby)
+        if (lobbyPlayers.isNotEmpty()) {
             Text(
                 text = "Your Lobby",
                 fontSize = 18.sp,
@@ -92,13 +90,10 @@ fun HomeScreen(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            connectedGroups.forEach { group ->
-                ConnectedGroupCard(
-                    group = group,
-                    onClick = onEnterLobby
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
+            ConnectedGroupCard(
+                players = lobbyPlayers,
+                onClick = onEnterLobby
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -113,45 +108,38 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         // Build unified peer list with invite status
-        val peersInLobby = connectedGroups.flatMap { it.players.map { p -> p.id } }.toSet()
-        val pendingRequestMap = pendingRequests.associateBy { it.fromPlayer.id }
+        val lobbyPlayerIds = lobbyPlayers.map { it.id }.toSet()
+        val incomingInviteMap = incomingInvites.associateBy { it.fromId }
 
-        // Create display info for discovered peers
-        val peerDisplayList = discoveredPeers
-            .filter { it.id !in peersInLobby }
+        val peerDisplayList = peers
+            .filter { it.id !in lobbyPlayerIds }
             .map { peer ->
                 PeerDisplayInfo(
                     peer = peer,
-                    hasIncomingInvite = peer.id in pendingRequestMap,
-                    hasSentInvite = peer.id in sentInvites,
-                    incomingRequest = pendingRequestMap[peer.id]
+                    hasIncomingInvite = peer.id in incomingInviteMap,
+                    hasSentInvite = peer.id in sentInviteIds,
+                    incomingInvite = incomingInviteMap[peer.id]
                 )
             }
-            // Sort: incoming invites first, then sent invites, then regular peers
             .sortedWith(compareByDescending<PeerDisplayInfo> { it.hasIncomingInvite }
-                .thenByDescending { it.hasSentInvite })
+            .thenByDescending { it.hasSentInvite })
 
         // Add peers who sent invites but aren't in discovered peers list yet
-        val discoveredPeerIds = discoveredPeers.map { it.id }.toSet()
-        val additionalInvites = pendingRequests
-            .filter { it.fromPlayer.id !in discoveredPeerIds && it.fromPlayer.id !in peersInLobby }
-            .map { request ->
+        val discoveredPeerIds = peers.map { it.id }.toSet()
+        val additionalInvites = incomingInvites
+            .filter { it.fromId !in discoveredPeerIds && it.fromId !in lobbyPlayerIds }
+            .map { invite ->
                 PeerDisplayInfo(
-                    peer = DiscoveredPeer(
-                        id = request.fromPlayer.id,
-                        name = request.fromPlayer.name,
-                        address = "unknown",
-                        port = 0
-                    ),
+                    peer = PeerInfo(id = invite.fromId, name = "Unknown", address = "", port = 0),
                     hasIncomingInvite = true,
                     hasSentInvite = false,
-                    incomingRequest = request
+                    incomingInvite = invite
                 )
             }
 
         val allPeers = additionalInvites + peerDisplayList
 
-        if (allPeers.isEmpty() && connectedGroups.isEmpty()) {
+        if (allPeers.isEmpty() && lobbyPlayers.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -210,9 +198,9 @@ fun HomeScreen(
                 items(allPeers, key = { it.peer.id }) { peerInfo ->
                     PeerCard(
                         peerInfo = peerInfo,
-                        onInvite = { onPeerClick(peerInfo.peer) },
-                        onAccept = { peerInfo.incomingRequest?.let { onAcceptRequest(it) } },
-                        onReject = { peerInfo.incomingRequest?.let { onRejectRequest(it) } }
+                        onInvite = { onInvitePeer(peerInfo.peer.id) },
+                        onAccept = { peerInfo.incomingInvite?.let { onAcceptInvite(it) } },
+                        onReject = { peerInfo.incomingInvite?.let { onRejectInvite(it) } }
                     )
                 }
             }
@@ -344,7 +332,7 @@ private fun PeerCard(
 
 @Composable
 private fun ConnectedGroupCard(
-    group: ConnectedGroup,
+    players: List<PeerInfo>,
     onClick: () -> Unit
 ) {
     Card(
@@ -367,7 +355,7 @@ private fun ConnectedGroupCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${group.players.size} players connected",
+                    text = "${players.size} players connected",
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                 )
@@ -392,10 +380,10 @@ private fun ConnectedGroupCard(
             Row(
                 horizontalArrangement = Arrangement.spacedBy((-8).dp)
             ) {
-                group.players.take(5).forEach { player ->
-                    PlayerAvatar(player = player)
+                players.take(5).forEach { player ->
+                    PlayerAvatar(name = player.name)
                 }
-                if (group.players.size > 5) {
+                if (players.size > 5) {
                     Box(
                         modifier = Modifier
                             .size(36.dp)
@@ -404,7 +392,7 @@ private fun ConnectedGroupCard(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "+${group.players.size - 5}",
+                            text = "+${players.size - 5}",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -416,7 +404,7 @@ private fun ConnectedGroupCard(
 
             // Player names
             Text(
-                text = group.players.joinToString(", ") { it.name },
+                text = players.joinToString(", ") { it.name },
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -426,7 +414,7 @@ private fun ConnectedGroupCard(
 }
 
 @Composable
-private fun PlayerAvatar(player: Player) {
+private fun PlayerAvatar(name: String) {
     Box(
         modifier = Modifier
             .size(36.dp)
@@ -435,7 +423,7 @@ private fun PlayerAvatar(player: Player) {
         contentAlignment = Alignment.Center
     ) {
         Text(
-            text = player.name.first().uppercase(),
+            text = name.first().uppercase(),
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             color = Color.White

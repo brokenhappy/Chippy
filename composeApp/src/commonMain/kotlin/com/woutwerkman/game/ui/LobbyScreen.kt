@@ -18,22 +18,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.woutwerkman.game.model.LobbyPlayer
-import com.woutwerkman.game.model.LobbyState
+import com.woutwerkman.net.LobbyInfo
+import com.woutwerkman.net.LobbyPlayer
 
 @Composable
 fun LobbyScreen(
-    lobbyState: LobbyState,
+    lobby: LobbyInfo,
     localPlayerId: String,
     countdownValue: Int?,
     onToggleReady: () -> Unit,
     onLeaveLobby: () -> Unit
 ) {
-    val players = lobbyState.players.values.toList()
-    val localPlayer = lobbyState.players[localPlayerId]
+    val players = lobby.players.entries.toList()
+    val localPlayer = lobby.players[localPlayerId]
     val isReady = localPlayer?.isReady ?: false
-    val allReady = players.isNotEmpty() && players.all { it.isReady }
-    
+    val allReady = players.isNotEmpty() && players.all { it.value.isReady }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -58,7 +58,7 @@ fun LobbyScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            
+
             TextButton(onClick = onLeaveLobby) {
                 Text(
                     text = "Leave",
@@ -66,9 +66,9 @@ fun LobbyScreen(
                 )
             }
         }
-        
+
         Spacer(modifier = Modifier.height(24.dp))
-        
+
         // Countdown overlay
         if (countdownValue != null) {
             Box(
@@ -94,10 +94,10 @@ fun LobbyScreen(
                     )
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(24.dp))
         }
-        
+
         // Players list
         Text(
             text = "Players",
@@ -106,32 +106,33 @@ fun LobbyScreen(
             color = MaterialTheme.colorScheme.primary
         )
         Spacer(modifier = Modifier.height(12.dp))
-        
+
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(players) { lobbyPlayer ->
+            items(players, key = { it.key }) { (playerId, lobbyPlayer) ->
                 LobbyPlayerCard(
-                    lobbyPlayer = lobbyPlayer,
-                    isLocalPlayer = lobbyPlayer.player.id == localPlayerId
+                    playerName = lobbyPlayer.name,
+                    isReady = lobbyPlayer.isReady,
+                    isLocalPlayer = playerId == localPlayerId
                 )
             }
         }
-        
+
         Spacer(modifier = Modifier.height(16.dp))
-        
+
         // Ready button
         val buttonScale by animateFloatAsState(
             targetValue = if (isReady) 1.05f else 1f,
             label = "buttonScale"
         )
-        
+
         val buttonColor by animateColorAsState(
             targetValue = if (isReady) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
             label = "buttonColor"
         )
-        
+
         Button(
             onClick = onToggleReady,
             modifier = Modifier
@@ -148,7 +149,7 @@ fun LobbyScreen(
                 fontWeight = FontWeight.SemiBold
             )
         }
-        
+
         if (allReady && countdownValue == null) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -163,18 +164,19 @@ fun LobbyScreen(
 
 @Composable
 private fun LobbyPlayerCard(
-    lobbyPlayer: LobbyPlayer,
+    playerName: String,
+    isReady: Boolean,
     isLocalPlayer: Boolean
 ) {
     val backgroundColor by animateColorAsState(
-        targetValue = if (lobbyPlayer.isReady) {
+        targetValue = if (isReady) {
             Color(0xFF4CAF50).copy(alpha = 0.15f)
         } else {
             MaterialTheme.colorScheme.surface
         },
         label = "cardBackground"
     )
-    
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
@@ -191,26 +193,26 @@ private fun LobbyPlayerCard(
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(
-                        if (lobbyPlayer.isReady) Color(0xFF4CAF50)
+                        if (isReady) Color(0xFF4CAF50)
                         else MaterialTheme.colorScheme.primaryContainer
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (lobbyPlayer.isReady) "✓" else lobbyPlayer.player.name.first().uppercase(),
+                    text = if (isReady) "✓" else playerName.first().uppercase(),
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (lobbyPlayer.isReady) Color.White
+                    color = if (isReady) Color.White
                     else MaterialTheme.colorScheme.onPrimaryContainer
                 )
             }
-            
+
             Spacer(modifier = Modifier.width(12.dp))
-            
+
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = lobbyPlayer.player.name,
+                        text = playerName,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -224,14 +226,14 @@ private fun LobbyPlayerCard(
                     }
                 }
                 Text(
-                    text = if (lobbyPlayer.isReady) "Ready" else "Not ready",
+                    text = if (isReady) "Ready" else "Not ready",
                     fontSize = 12.sp,
-                    color = if (lobbyPlayer.isReady) Color(0xFF4CAF50)
+                    color = if (isReady) Color(0xFF4CAF50)
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            
-            if (lobbyPlayer.isReady) {
+
+            if (isReady) {
                 Box(
                     modifier = Modifier
                         .size(24.dp)

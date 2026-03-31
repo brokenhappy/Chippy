@@ -21,20 +21,20 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.woutwerkman.game.model.GamePhase
-import com.woutwerkman.game.model.GameState
-import com.woutwerkman.game.model.PlayerGameState
 import kotlin.math.abs
 
 @Composable
 fun GameScreen(
-    gameState: GameState,
+    playerValues: Map<String, Int>,
+    playerNames: Map<String, String>,
+    gamePhase: GamePhase,
     localPlayerId: String,
     countdownValue: Int?,
     onButtonPress: (String) -> Unit
 ) {
-    val players = gameState.players.values.toList()
+    val players = playerValues.entries.toList()
     val allZeros = players.isNotEmpty() && players.all { it.value == 0 }
-    
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -49,9 +49,9 @@ fun GameScreen(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             // Instructions
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -78,9 +78,9 @@ fun GameScreen(
                     )
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(24.dp))
-            
+
             // Player buttons grid
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
@@ -88,17 +88,18 @@ fun GameScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(players) { playerState ->
+                items(players, key = { it.key }) { (playerId, value) ->
                     PlayerButton(
-                        playerState = playerState,
-                        isLocalPlayer = playerState.playerId == localPlayerId,
-                        enabled = gameState.gamePhase == GamePhase.PLAYING,
-                        onClick = { onButtonPress(playerState.playerId) }
+                        playerName = playerNames[playerId] ?: "Unknown",
+                        value = value,
+                        isLocalPlayer = playerId == localPlayerId,
+                        enabled = gamePhase == GamePhase.PLAYING,
+                        onClick = { onButtonPress(playerId) }
                     )
                 }
             }
         }
-        
+
         // Countdown overlay
         if (countdownValue != null) {
             Box(
@@ -108,13 +109,13 @@ fun GameScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (gameState.gamePhase == GamePhase.COUNTDOWN) {
+                    if (gamePhase == GamePhase.COUNTDOWN) {
                         Text(
                             text = "Get ready!",
                             fontSize = 24.sp,
                             color = Color.White
                         )
-                    } else if (gameState.gamePhase == GamePhase.WIN_COUNTDOWN) {
+                    } else if (gamePhase == GamePhase.WIN_COUNTDOWN) {
                         Text(
                             text = "ALL ZEROS!",
                             fontSize = 28.sp,
@@ -132,7 +133,7 @@ fun GameScreen(
                 }
             }
         }
-        
+
         // Win state glow effect
         if (allZeros && countdownValue == null) {
             val infiniteTransition = rememberInfiniteTransition(label = "winGlow")
@@ -145,7 +146,7 @@ fun GameScreen(
                 ),
                 label = "glowAlpha"
             )
-            
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -157,28 +158,27 @@ fun GameScreen(
 
 @Composable
 private fun PlayerButton(
-    playerState: PlayerGameState,
+    playerName: String,
+    value: Int,
     isLocalPlayer: Boolean,
     enabled: Boolean,
     onClick: () -> Unit
 ) {
-    val value = playerState.value
     val isZero = value == 0
-    
+
     // Calculate color based on proximity to zero
-    // Closer to 0 = greener
     val greenness = 1f - (abs(value) / 25f)
     val baseColor = lerp(
         Color(0xFFE57373), // Red when far from 0
         Color(0xFF4CAF50), // Green when at 0
         greenness
     )
-    
+
     val backgroundColor by animateColorAsState(
         targetValue = if (isZero) Color(0xFF4CAF50) else baseColor,
         label = "buttonColor"
     )
-    
+
     // Glow animation for zero
     val infiniteTransition = rememberInfiniteTransition(label = "zeroGlow")
     val glowScale by infiniteTransition.animateFloat(
@@ -190,7 +190,7 @@ private fun PlayerButton(
         ),
         label = "glowScale"
     )
-    
+
     Button(
         onClick = onClick,
         modifier = Modifier
@@ -212,21 +212,21 @@ private fun PlayerButton(
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = playerState.playerName,
+                text = playerName,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = Color.White.copy(alpha = 0.9f)
             )
-            
+
             Spacer(modifier = Modifier.height(4.dp))
-            
+
             Text(
                 text = value.toString(),
                 fontSize = 36.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
-            
+
             if (isLocalPlayer) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(

@@ -1,7 +1,7 @@
 package com.woutwerkman.net
 
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.flow.first
 
 /**
  * Platform identifiers for connectivity testing.
@@ -55,9 +55,10 @@ sealed class ConnectivityTestResult {
 }
 
 /**
- * Runs the connectivity verification test.
+ * Runs the connectivity verification test using the linearized peer network.
  *
- * This test verifies bidirectional connectivity by waiting for Joined events.
+ * Verifies that all target platforms join the network and appear in the
+ * collectively agreed-upon state (discoveredPeers).
  */
 suspend fun runConnectivityTest(config: ConnectivityTestConfig): ConnectivityTestResult {
     println("[${config.instanceId}] Starting connectivity test")
@@ -85,92 +86,43 @@ private suspend fun CoroutineScope.verifyConnectivity(
     config: ConnectivityTestConfig,
     connection: PeerNetConnection
 ): ConnectivityTestResult {
-    val joinedPlatforms = mutableSetOf<TestPlatform>()
-
-    println("[${config.instanceId}] Waiting for Joined events from: ${config.targetPlatforms}")
+    println("[${config.instanceId}] Waiting for all target platforms in linearized state...")
 
     try {
-        while (isActive) {
-            val message = withTimeoutOrNull(1000) {
-                try {
-                    connection.incoming.receive()
-                } catch (e: ClosedReceiveChannelException) {
-                    null
-                }
-            }
-
-            when (message) {
-                is PeerMessage.Event.Connected -> {
-                    val peer = message.peer
-                    println("[${config.instanceId}] Peer JOINED: ${peer.name} (${peer.id})")
-
-                    // Skip if this peer is ourselves (peer.name is the instanceId/displayName)
-                    if (peer.name == config.instanceId) continue
-
-                    val platform = TestPlatform.fromPeerId(peer.id)
-                    if (platform != null) {
-                        val normalizedPlatform = normalizePlatform(platform, config.targetPlatforms)
-                        if (normalizedPlatform != null) {
-                            joinedPlatforms.add(normalizedPlatform)
-                            println("[${config.instanceId}] Platform joined: $normalizedPlatform (${joinedPlatforms.size}/${config.targetPlatforms.size})")
-
-                            if (joinedPlatforms.containsAll(config.targetPlatforms)) {
-                                println("[${config.instanceId}] All platforms connected, verifying data exchange...")
-
-                                // Send a test payload to all connected peers
-                                val testPayload = "PING:${config.instanceId}"
-                                connection.outgoing.send(PeerCommand.Broadcast(testPayload.encodeToByteArray()))
-
-                                // Wait for responses (or timeout after 3s)
-                                val gotResponse = withTimeoutOrNull(3000) {
-                                    while (true) {
-                                        val resp = connection.incoming.receive()
-                                        if (resp is PeerMessage.Received) {
-                                            val data = resp.payload.decodeToString()
-                                            if (data.startsWith("PING:") || data.startsWith("PONG:")) {
-                                                println("[${config.instanceId}] Data exchange verified with ${resp.fromPeerId}")
-                                                break
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Also respond to any PING we receive
-                                connection.outgoing.send(PeerCommand.Broadcast("PONG:${config.instanceId}".encodeToByteArray()))
-
-                                // Keep connection alive so slower peers (e.g. emulators) can
-                                // complete their handshakes with us before we exit
-                                delay(5000)
-                                println("[${config.instanceId}] SUCCESS: All platforms connected and data exchange verified!")
-                                return ConnectivityTestResult.Success
-                            }
-                        }
-                    }
-                }
-                is PeerMessage.Event.Disconnected -> {
-                    println("[${config.instanceId}] Peer left: ${message.peerId}")
-                }
-                is PeerMessage.Received -> {
-                    val data = message.payload.decodeToString()
-                    println("[${config.instanceId}] Received data from ${message.fromPeerId}: ${data.take(50)}")
-                    // Respond to PING with PONG
-                    if (data.startsWith("PING:")) {
-                        connection.outgoing.send(PeerCommand.Broadcast("PONG:${config.instanceId}".encodeToByteArray()))
-                    }
-                }
-                null -> { }
-            }
+        // Wait until the linearized state contains all target platforms
+        val finalState = connection.state.first { state ->
+            val joinedPlatforms = matchedPlatforms(state, config)
+            println("[${config.instanceId}] Linearized state has ${state.discoveredPeers.size} peers, matched platforms: $joinedPlatforms (need: ${config.targetPlatforms})")
+            joinedPlatforms.containsAll(config.targetPlatforms)
         }
+
+        println("[${config.instanceId}] All platforms found in linearized state!")
+        println("[${config.instanceId}] Peers: ${finalState.discoveredPeers.values.map { "${it.name} (${it.id})" }}")
+
+        // Keep connection alive so slower peers can complete their handshakes
+        delay(5000)
+        println("[${config.instanceId}] SUCCESS: All platforms connected via linearized peer network!")
+        return ConnectivityTestResult.Success
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         return ConnectivityTestResult.Failure("Error during test: ${e.message}", e)
     }
+}
 
-    val missingPlatforms = config.targetPlatforms - joinedPlatforms
-    return ConnectivityTestResult.Failure(
-        "Failed to connect to all platforms. Missing: $missingPlatforms. Connected: $joinedPlatforms"
-    )
+private fun matchedPlatforms(state: PeerNetState, config: ConnectivityTestConfig): Set<TestPlatform> {
+    val matched = mutableSetOf<TestPlatform>()
+    for ((peerId, peer) in state.discoveredPeers) {
+        // Skip ourselves
+        if (peer.name == config.instanceId) continue
+
+        val platform = TestPlatform.fromPeerId(peerId) ?: continue
+        val normalized = normalizePlatform(platform, config.targetPlatforms)
+        if (normalized != null) {
+            matched.add(normalized)
+        }
+    }
+    return matched
 }
 
 private fun normalizePlatform(platform: TestPlatform, targets: Set<TestPlatform>): TestPlatform? {

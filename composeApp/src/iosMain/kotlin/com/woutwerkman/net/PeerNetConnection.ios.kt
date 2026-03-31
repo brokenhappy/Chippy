@@ -16,11 +16,11 @@ private const val HANDSHAKE_HELLO = "${HANDSHAKE_PREFIX}HELLO|"
 private const val HANDSHAKE_ACK = "${HANDSHAKE_PREFIX}ACK|"
 
 @OptIn(ExperimentalForeignApi::class)
-internal actual suspend fun <T> withPeerNetConnectionImpl(
+internal actual suspend fun <T> withRawPeerNetConnectionImpl(
     config: PeerNetConfig,
-    block: suspend CoroutineScope.(PeerNetConnection) -> T
+    block: suspend CoroutineScope.(RawPeerNetConnection) -> T
 ): T = coroutineScope {
-    val incoming = Channel<PeerMessage>(Channel.BUFFERED)
+    val incoming = Channel<RawPeerMessage>(Channel.BUFFERED)
     val outgoing = Channel<PeerCommand>(Channel.BUFFERED)
 
     val peerId = "ios-${currentTimeMillis().toString(36)}-${Random.nextLong().toString(36)}"
@@ -33,7 +33,7 @@ internal actual suspend fun <T> withPeerNetConnectionImpl(
 
     try {
         impl.start()
-        val connection = PeerNetConnection(incoming, outgoing)
+        val connection = RawPeerNetConnection(peerId, incoming, outgoing)
 
         // Handle outgoing commands
         val commandJob = launch {
@@ -75,7 +75,7 @@ private data class PeerState(
 private class IosPeerNetConnectionImpl(
     private val config: PeerNetConfig,
     private val peerId: String,
-    private val incoming: Channel<PeerMessage>,
+    private val incoming: Channel<RawPeerMessage>,
     private val scope: CoroutineScope
 ) {
     private val serviceType = "_${config.serviceName}._udp."
@@ -225,7 +225,7 @@ private class IosPeerNetConnectionImpl(
                                         val state = peerStates[fromPeerId]
                                         if (state?.isJoined == true) {
                                             scope.launch {
-                                                incoming.send(PeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
+                                                incoming.send(RawPeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
                                             }
                                         }
                                     }
@@ -278,7 +278,7 @@ private class IosPeerNetConnectionImpl(
             state.isJoined = true
             NSLog("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
             scope.launch {
-                incoming.send(PeerMessage.Event.Connected(state.info))
+                incoming.send(RawPeerMessage.Event.Connected(state.info))
             }
         }
     }

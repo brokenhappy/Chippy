@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.json.Json
 
 /**
- * NetworkTransport implementation that uses PeerNetConnection for peer discovery and messaging.
- * This adapter bridges the channel-based PeerNetConnection API with the callback-based NetworkTransport API.
+ * NetworkTransport implementation that uses RawPeerNetConnection for peer discovery and messaging.
+ * This adapter bridges the channel-based RawPeerNetConnection API with the callback-based NetworkTransport API.
  */
 class PeerNetTransport(
     private val peerId: String,
@@ -17,7 +17,7 @@ class PeerNetTransport(
 ) : NetworkTransport {
 
     private var messageHandler: ((String) -> Unit)? = null
-    private var connection: PeerNetConnection? = null
+    private var connection: RawPeerNetConnection? = null
     private var scope: CoroutineScope? = null
     private var connectionJob: Job? = null
 
@@ -48,7 +48,7 @@ class PeerNetTransport(
         // Launch the connection in a new coroutine
         connectionJob = CoroutineScope(Dispatchers.Default + SupervisorJob()).launch {
             scope = this
-            withPeerNetConnection(config) { conn ->
+            withRawPeerNetConnection(config) { conn ->
                 connection = conn
 
                 // Periodically re-broadcast discovery for all known peers
@@ -73,7 +73,7 @@ class PeerNetTransport(
                     // Process incoming messages
                     for (message in conn.incoming) {
                         when (message) {
-                            is PeerMessage.Event.Connected -> {
+                            is RawPeerMessage.Event.Connected -> {
                                 val isReconnection = message.peer.id in previouslySeenPeers
                                 println("PeerNetTransport: Peer joined ${message.peer.name} (${message.peer.id})${if (isReconnection) " [reconnection]" else ""}")
                                 discoveredPeers.value = discoveredPeers.value + (message.peer.id to message.peer)
@@ -89,7 +89,7 @@ class PeerNetTransport(
                                 val discoveryMsg = NetworkMessage.Discovery(discoveryPeer)
                                 messageHandler?.invoke(json.encodeToString(discoveryMsg))
                             }
-                            is PeerMessage.Event.Disconnected -> {
+                            is RawPeerMessage.Event.Disconnected -> {
                                 println("PeerNetTransport: Peer left ${message.peerId}")
                                 discoveredPeers.value = discoveredPeers.value - message.peerId
 
@@ -97,7 +97,7 @@ class PeerNetTransport(
                                 val leavingMsg = NetworkMessage.PeerLeaving(message.peerId)
                                 messageHandler?.invoke(json.encodeToString(leavingMsg))
                             }
-                            is PeerMessage.Received -> {
+                            is RawPeerMessage.Received -> {
                                 val payload = message.payload.decodeToString()
                                 println("PeerNetTransport: Received data from ${message.fromPeerId}: ${payload.take(50)}...")
                                 messageHandler?.invoke(payload)
@@ -147,17 +147,17 @@ class PeerNetTransport(
     }
 
     override suspend fun connectTo(address: String, port: Int) {
-        // PeerNetConnection handles connections automatically through discovery
+        // RawPeerNetConnection handles connections automatically through discovery
         println("PeerNetTransport: connectTo called for $address:$port (handled by discovery)")
     }
 
     override suspend fun startServer() {
-        // PeerNetConnection starts advertising automatically
+        // RawPeerNetConnection starts advertising automatically
         println("PeerNetTransport: startServer called (handled by discovery)")
     }
 
     override suspend fun stopServer() {
-        // PeerNetConnection stops advertising when closed
+        // RawPeerNetConnection stops advertising when closed
         println("PeerNetTransport: stopServer called (handled by stopDiscovery)")
     }
 

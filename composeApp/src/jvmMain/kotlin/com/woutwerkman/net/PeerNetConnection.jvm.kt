@@ -19,12 +19,12 @@ private const val HANDSHAKE_PREFIX = "_PN_HS_"
 private const val HANDSHAKE_HELLO = "${HANDSHAKE_PREFIX}HELLO|"      // I see you
 private const val HANDSHAKE_ACK = "${HANDSHAKE_PREFIX}ACK|"          // I confirm I see you too
 
-internal actual suspend fun <T> withPeerNetConnectionImpl(
+internal actual suspend fun <T> withRawPeerNetConnectionImpl(
     config: PeerNetConfig,
-    block: suspend CoroutineScope.(PeerNetConnection) -> T
+    block: suspend CoroutineScope.(RawPeerNetConnection) -> T
 ): T = coroutineScope {
     val peerId = generatePeerId()
-    val incoming = Channel<PeerMessage>(Channel.BUFFERED)
+    val incoming = Channel<RawPeerMessage>(Channel.BUFFERED)
     val outgoing = Channel<PeerCommand>(Channel.BUFFERED)
 
     val transport = JvmPeerTransport(
@@ -37,7 +37,7 @@ internal actual suspend fun <T> withPeerNetConnectionImpl(
 
     try {
         transport.start(this)
-        val connection = PeerNetConnection(incoming, outgoing)
+        val connection = RawPeerNetConnection(peerId, incoming, outgoing)
         block(connection)
     } finally {
         transport.stop()
@@ -68,7 +68,7 @@ private class JvmPeerTransport(
     private val peerId: String,
     private val peerName: String,
     private val serviceName: String,
-    private val incomingChannel: SendChannel<PeerMessage>,
+    private val incomingChannel: SendChannel<RawPeerMessage>,
     private val outgoingChannel: ReceiveChannel<PeerCommand>
 ) {
     private var jmdns: JmDNS? = null
@@ -221,7 +221,7 @@ private class JvmPeerTransport(
             val state = peerStates.remove(pId)
             if (state?.isJoined == true) {
                 scope?.launch {
-                    incomingChannel.send(PeerMessage.Event.Disconnected(pId))
+                    incomingChannel.send(RawPeerMessage.Event.Disconnected(pId))
                 }
             }
         }
@@ -287,7 +287,7 @@ private class JvmPeerTransport(
                             // Application data - only forward if peer is joined
                             val state = peerStates[fromPeerId]
                             if (state?.isJoined == true) {
-                                incomingChannel.send(PeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
+                                incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
                             }
                         }
                     }
@@ -362,7 +362,7 @@ private class JvmPeerTransport(
             state.isJoined = true
             println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
             scope?.launch {
-                incomingChannel.send(PeerMessage.Event.Connected(state.info))
+                incomingChannel.send(RawPeerMessage.Event.Connected(state.info))
             }
         }
     }

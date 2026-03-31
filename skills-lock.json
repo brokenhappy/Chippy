@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "debugger": {
+      "source": "Shubhamsaboo/awesome-llm-apps",
+      "sourceType": "github",
+      "computedHash": "609b0b6d79fe21bcb5eb8a01b38f5571b8ae05be826936a312bc04d9c5400193"
+    },
+    "ux-designer": {
+      "source": "Shubhamsaboo/awesome-llm-apps",
+      "sourceType": "github",
+      "computedHash": "1178ae59d9dd5ca71122674d85bd78d746b3b95f76c58c65cb0fd48dd54bea45"
+    },
+    "visualization-expert": {
+      "source": "Shubhamsaboo/awesome-llm-apps",
+      "sourceType": "github",
+      "computedHash": "cd8f8bc48c6790cb3b25a13e7a7b05dccd6fd5213577ca59d3c232282d1e151a"
+    }
+  }
+}

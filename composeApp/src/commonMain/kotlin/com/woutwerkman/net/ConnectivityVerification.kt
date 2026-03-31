@@ -25,8 +25,12 @@ enum class TestPlatform {
 
         fun fromPeerId(peerId: String): TestPlatform? = when {
             peerId.startsWith("jvm-") -> JVM
-            peerId.startsWith("android-") -> ANDROID_SIMULATOR
-            peerId.startsWith("ios-") -> IOS_REAL_DEVICE
+            peerId.startsWith("android-sim-") -> ANDROID_SIMULATOR
+            peerId.startsWith("android-device-") -> ANDROID_REAL_DEVICE
+            peerId.startsWith("android-") -> ANDROID_SIMULATOR // fallback for generic android IDs
+            peerId.startsWith("ios-sim") -> IOS_SIMULATOR
+            peerId.startsWith("ios-device") -> IOS_REAL_DEVICE
+            peerId.startsWith("ios-") -> IOS_REAL_DEVICE // fallback for generic ios IDs
             else -> null
         }
     }
@@ -100,6 +104,9 @@ private suspend fun CoroutineScope.verifyConnectivity(
                     val peer = message.peer
                     println("[${config.instanceId}] Peer JOINED: ${peer.name} (${peer.id})")
 
+                    // Skip if this peer is ourselves (peer.name is the instanceId/displayName)
+                    if (peer.name == config.instanceId) continue
+
                     val platform = TestPlatform.fromPeerId(peer.id)
                     if (platform != null) {
                         val normalizedPlatform = normalizePlatform(platform, config.targetPlatforms)
@@ -108,8 +115,33 @@ private suspend fun CoroutineScope.verifyConnectivity(
                             println("[${config.instanceId}] Platform joined: $normalizedPlatform (${joinedPlatforms.size}/${config.targetPlatforms.size})")
 
                             if (joinedPlatforms.containsAll(config.targetPlatforms)) {
-                                delay(1000) // Give other platforms a moment to also join
-                                println("[${config.instanceId}] SUCCESS: All platforms connected!")
+                                println("[${config.instanceId}] All platforms connected, verifying data exchange...")
+
+                                // Send a test payload to all connected peers
+                                val testPayload = "PING:${config.instanceId}"
+                                connection.outgoing.send(PeerCommand.Broadcast(testPayload.encodeToByteArray()))
+
+                                // Wait for responses (or timeout after 3s)
+                                val gotResponse = withTimeoutOrNull(3000) {
+                                    while (true) {
+                                        val resp = connection.incoming.receive()
+                                        if (resp is PeerMessage.Received) {
+                                            val data = resp.payload.decodeToString()
+                                            if (data.startsWith("PING:") || data.startsWith("PONG:")) {
+                                                println("[${config.instanceId}] Data exchange verified with ${resp.fromPeerId}")
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Also respond to any PING we receive
+                                connection.outgoing.send(PeerCommand.Broadcast("PONG:${config.instanceId}".encodeToByteArray()))
+
+                                // Keep connection alive so slower peers (e.g. emulators) can
+                                // complete their handshakes with us before we exit
+                                delay(5000)
+                                println("[${config.instanceId}] SUCCESS: All platforms connected and data exchange verified!")
                                 return ConnectivityTestResult.Success
                             }
                         }
@@ -119,7 +151,12 @@ private suspend fun CoroutineScope.verifyConnectivity(
                     println("[${config.instanceId}] Peer left: ${message.peerId}")
                 }
                 is PeerMessage.Received -> {
-                    println("[${config.instanceId}] Received data from ${message.fromPeerId}")
+                    val data = message.payload.decodeToString()
+                    println("[${config.instanceId}] Received data from ${message.fromPeerId}: ${data.take(50)}")
+                    // Respond to PING with PONG
+                    if (data.startsWith("PING:")) {
+                        connection.outgoing.send(PeerCommand.Broadcast("PONG:${config.instanceId}".encodeToByteArray()))
+                    }
                 }
                 null -> { }
             }

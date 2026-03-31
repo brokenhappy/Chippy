@@ -39,7 +39,7 @@
     <string>Used for peer-to-peer connectivity testing</string>
     <key>NSBonjourServices</key>
     <array>
-        <string>_chippytest._udp.</string>
+        <string>_chippy-test._udp.</string>
     </array>
 </dict>
 </plist>

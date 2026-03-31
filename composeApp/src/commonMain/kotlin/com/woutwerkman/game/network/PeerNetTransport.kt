@@ -22,8 +22,9 @@ class PeerNetTransport(
     private var connectionJob: Job? = null
 
     private val discoveredPeers = MutableStateFlow<Map<String, PeerInfo>>(emptyMap())
+    private val previouslySeenPeers = mutableSetOf<String>()
     private var localAddress: String = "0.0.0.0"
-    private var localPort: Int = DISCOVERY_PORT
+    private var localPort: Int = 0
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -73,8 +74,10 @@ class PeerNetTransport(
                     for (message in conn.incoming) {
                         when (message) {
                             is PeerMessage.Event.Connected -> {
-                                println("PeerNetTransport: Peer joined ${message.peer.name} (${message.peer.id})")
+                                val isReconnection = message.peer.id in previouslySeenPeers
+                                println("PeerNetTransport: Peer joined ${message.peer.name} (${message.peer.id})${if (isReconnection) " [reconnection]" else ""}")
                                 discoveredPeers.value = discoveredPeers.value + (message.peer.id to message.peer)
+                                previouslySeenPeers.add(message.peer.id)
 
                                 // Convert to Discovery message for NetworkManager
                                 val discoveryPeer = DiscoveredPeer(
@@ -125,8 +128,8 @@ class PeerNetTransport(
 
     override suspend fun sendTo(address: String, port: Int, message: String) {
         val conn = connection ?: return
-        // Find peer by address
-        val peer = discoveredPeers.value.values.find { it.address == address }
+        // Find peer by address and port
+        val peer = discoveredPeers.value.values.find { it.address == address && it.port == port }
         if (peer != null) {
             try {
                 conn.outgoing.send(PeerCommand.SendTo(peer.id, message.encodeToByteArray()))

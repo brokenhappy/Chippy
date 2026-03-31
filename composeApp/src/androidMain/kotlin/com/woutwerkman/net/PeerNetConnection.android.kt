@@ -90,11 +90,20 @@ private class AndroidPeerTransport(
                 localAddress = getLocalIpAddress()
                 println("[PeerNet-$peerId] Local IP: $localAddress")
 
-                // Start UDP socket for messaging - use port 0 to let OS assign
-                udpSocket = DatagramSocket(0).apply {
-                    reuseAddress = true
-                    broadcast = true
-                    soTimeout = 100
+                // Start UDP socket for messaging - try MESSAGE_PORT first for emulator adb reverse compatibility
+                udpSocket = try {
+                    DatagramSocket(MESSAGE_PORT).apply {
+                        reuseAddress = true
+                        broadcast = true
+                        soTimeout = 100
+                    }
+                } catch (e: Exception) {
+                    println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
+                    DatagramSocket(0).apply {
+                        reuseAddress = true
+                        broadcast = true
+                        soTimeout = 100
+                    }
                 }
                 localPort = udpSocket!!.localPort
                 println("[PeerNet-$peerId] Bound to port $localPort")
@@ -227,7 +236,7 @@ private class AndroidPeerTransport(
                     if (fromPeerId == peerId) continue
                     val payload = message.substring(separatorIndex + 1)
                     when {
-                        payload.startsWith(HANDSHAKE_HELLO) -> handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "")
+                        payload.startsWith(HANDSHAKE_HELLO) -> handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "", packet.port)
                         payload.startsWith(HANDSHAKE_ACK) -> handleAckReceived(fromPeerId)
                         else -> {
                             val state = peerStates[fromPeerId]
@@ -244,18 +253,19 @@ private class AndroidPeerTransport(
         }
     }
 
-    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String) {
+    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String, fromPort: Int) {
         val helloData = payload.removePrefix(HANDSHAKE_HELLO)
         val parts = helloData.split("|")
         val pName = parts.getOrNull(0) ?: "Unknown"
         var pAddr = parts.getOrNull(2) ?: fromAddress
-        val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
-        
-        // Emulator logic: 
-        // 1. If we receive a HELLO with 10.0.2.15, it's from another emulator or ourselves (translated). 
-        //    Use fromAddress which is the correct address to respond to.
+        var pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+        // Emulator logic:
+        // 1. If we receive a HELLO with 10.0.2.15, it's from another emulator or ourselves (translated).
+        //    Use fromAddress and fromPort which are the correct return path through the NAT.
         if (pAddr == "10.0.2.15") {
             pAddr = fromAddress
+            pPort = fromPort
         }
         
         // 2. If we are an emulator (our IP is 10.0.2.15) and the peer is NOT an emulator,
@@ -274,10 +284,9 @@ private class AndroidPeerTransport(
             if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
             else { existing.weSeeThemViaDiscovery = true; existing }
         }!!
-        if (!state.weAckedThem) {
-            sendHandshakeAck(peerInfo)
-            state.weAckedThem = true
-        }
+        // Always send ACK in reply to HELLO — the peer may have missed our earlier ACK
+        sendHandshakeAck(peerInfo)
+        state.weAckedThem = true
         checkAndEmitJoined(state)
     }
 
@@ -307,10 +316,13 @@ private class AndroidPeerTransport(
 
     private fun sendUdp(address: String, port: Int, message: String) {
         try {
+            val socket = udpSocket ?: return
             val data = message.toByteArray(Charsets.UTF_8)
             val packet = DatagramPacket(data, data.size, InetAddress.getByName(address), port)
-            DatagramSocket().use { it.send(packet) }
-        } catch (e: Exception) {}
+            socket.send(packet)
+        } catch (e: Exception) {
+            println("[PeerNet-$peerId] Send error to $address:$port: ${e.message}")
+        }
     }
 
     private suspend fun processOutgoingCommands() {

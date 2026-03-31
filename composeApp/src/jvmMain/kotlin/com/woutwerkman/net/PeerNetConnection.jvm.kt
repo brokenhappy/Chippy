@@ -278,7 +278,7 @@ private class JvmPeerTransport(
 
                     when {
                         payload.startsWith(HANDSHAKE_HELLO) -> {
-                            handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "")
+                            handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "", packet.port)
                         }
                         payload.startsWith(HANDSHAKE_ACK) -> {
                             handleAckReceived(fromPeerId)
@@ -306,23 +306,21 @@ private class JvmPeerTransport(
      * When we receive HELLO from a peer, we know they can see us.
      * We send ACK back and also mark them as discovered if we haven't seen them via mDNS.
      */
-    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String) {
+    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String, fromPort: Int) {
         // Parse HELLO payload: "peerName|peerId|address|port"
         val helloData = payload.removePrefix(HANDSHAKE_HELLO)
         val parts = helloData.split("|")
         val pName = parts.getOrNull(0) ?: "Unknown"
         var pAddr = parts.getOrNull(2) ?: fromAddress
-        val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+        var pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
 
-        // If peer is an Android emulator (sending 10.0.2.15), and we are the host, 
-        // we must respond to 10.0.2.2 if we want to reach it back via ADB reverse,
-        // OR simply use the packet's source address if it's already translated by the emulator.
-        // On the host, the emulator appears as 127.0.0.1 if port-forwarded, or 10.0.2.2 doesn't exist.
-        // Actually, if we are on host and emulator sends 10.0.2.15, we can't reach it back easily.
-        // But if the packet arrived, fromAddress should be correct for responding.
+        // If peer is an Android emulator (sending 10.0.2.15), the emulator's NAT translates
+        // both address and port. We must use the packet's actual source address AND port
+        // to route responses back through the NAT correctly.
         if (pAddr == "10.0.2.15") {
-            println("[PeerNet-$peerId] Mapping emulator 10.0.2.15 to source address $fromAddress")
+            println("[PeerNet-$peerId] Mapping emulator 10.0.2.15:$pPort to packet source $fromAddress:$fromPort")
             pAddr = fromAddress
+            pPort = fromPort
         }
 
         val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
@@ -337,11 +335,9 @@ private class JvmPeerTransport(
             }
         }!!
 
-        // Send ACK back
-        if (!state.weAckedThem) {
-            sendHandshakeAck(peerInfo)
-            state.weAckedThem = true
-        }
+        // Always send ACK in reply to HELLO — the peer may have missed our earlier ACK
+        sendHandshakeAck(peerInfo)
+        state.weAckedThem = true
 
         // Check if fully connected
         checkAndEmitJoined(state)

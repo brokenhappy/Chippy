@@ -91,6 +91,7 @@ private class IosPeerNetConnectionImpl(
     private var receiveJob: Job? = null
     private var handshakeJob: Job? = null
     private var localAddress: String = "0.0.0.0"
+    private var boundPort: Int = MESSAGE_PORT
 
     suspend fun start() {
         NSLog("[PeerNet-$peerId] Starting peer discovery")
@@ -106,12 +107,12 @@ private class IosPeerNetConnectionImpl(
         // Periodic handshake maintenance and run loop processing
         handshakeJob = scope.launch {
             while (isActive) {
-                // Process run loop to let Bonjour callbacks fire
+                // Process run loop to let Bonjour callbacks fire (50ms window for better responsiveness)
                 withContext(Dispatchers.Main) {
-                    NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.01))
+                    NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
                 }
 
-                delay(100)
+                delay(50)
 
                 peerStates.values.toList().forEach { state ->
                     if (state.weSeeThemViaDiscovery && !state.isJoined) {
@@ -141,19 +142,31 @@ private class IosPeerNetConnectionImpl(
             addr.sin_port = htons(MESSAGE_PORT.toUShort())
             addr.sin_addr.s_addr = INADDR_ANY
 
-            val bindResult = bind(udpSocket, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
+            var bindResult = bind(udpSocket, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
             if (bindResult < 0) {
-                NSLog("[PeerNet-$peerId] Failed to bind UDP socket")
-                close(udpSocket)
-                udpSocket = -1
-                return
+                NSLog("[PeerNet-$peerId] Failed to bind to port $MESSAGE_PORT, falling back to random port")
+                addr.sin_port = htons(0.toUShort())
+                bindResult = bind(udpSocket, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
+                if (bindResult < 0) {
+                    NSLog("[PeerNet-$peerId] Failed to bind UDP socket on fallback port")
+                    close(udpSocket)
+                    udpSocket = -1
+                    return
+                }
             }
+
+            // Read the actual bound port
+            val boundAddr = alloc<sockaddr_in>()
+            val addrLen = alloc<UIntVar>()
+            addrLen.value = sizeOf<sockaddr_in>().toUInt()
+            getsockname(udpSocket, boundAddr.ptr.reinterpret(), addrLen.ptr)
+            boundPort = htons(boundAddr.sin_port).toInt()
         }
 
         val flags = fcntl(udpSocket, F_GETFL, 0)
         fcntl(udpSocket, F_SETFL, flags or O_NONBLOCK)
 
-        NSLog("[PeerNet-$peerId] Listening on port $MESSAGE_PORT")
+        NSLog("[PeerNet-$peerId] Listening on port $boundPort")
 
         receiveJob = scope.launch(Dispatchers.Default) {
             receiveLoop()
@@ -246,10 +259,9 @@ private class IosPeerNetConnectionImpl(
         }
         state.weSeeThemViaDiscovery = true
 
-        if (!state.weAckedThem) {
-            sendHandshakeAck(peerInfo)
-            state.weAckedThem = true
-        }
+        // Always send ACK in reply to HELLO — the peer may have missed our earlier ACK
+        sendHandshakeAck(peerInfo)
+        state.weAckedThem = true
 
         checkAndEmitJoined(state)
     }
@@ -272,7 +284,7 @@ private class IosPeerNetConnectionImpl(
     }
 
     private fun startBonjour() {
-        val serviceName = "${config.displayName}|$peerId|$localAddress|$MESSAGE_PORT"
+        val serviceName = "${config.displayName}|$peerId|$localAddress|$boundPort"
         NSLog("[PeerNet-$peerId] Registering service: $serviceName")
         NSLog("[PeerNet-$peerId] Service type: $serviceType")
 
@@ -282,7 +294,7 @@ private class IosPeerNetConnectionImpl(
             domain = "local.",
             type = serviceType,
             name = serviceName,
-            port = MESSAGE_PORT
+            port = boundPort
         )
         netService?.delegate = publishDelegate
         NSLog("[PeerNet-$peerId] Calling publish()...")
@@ -337,7 +349,7 @@ private class IosPeerNetConnectionImpl(
     }
 
     private fun sendHandshakeHello(peer: PeerInfo) {
-        val payload = "$HANDSHAKE_HELLO${config.displayName}|$peerId|$localAddress|$MESSAGE_PORT"
+        val payload = "$HANDSHAKE_HELLO${config.displayName}|$peerId|$localAddress|$boundPort"
         NSLog("[PeerNet-$peerId] Sending HELLO to ${peer.name} at ${peer.address}:${peer.port}")
         sendUdp(peer.address, peer.port, "$peerId:$payload")
     }

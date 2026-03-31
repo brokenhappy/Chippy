@@ -16,24 +16,6 @@ data class PeerInfo(
     val port: Int
 )
 
-data class PeerMessageV2(
-    /**
-     * When receiving, this represents the peer that sent the message.
-     * When sending, this represents the peer that the message is intended for, or null if it's a broadcast.
-     */
-    val peerId: String?,
-    val event: Event,
-) {
-    sealed class Event {
-        @Serializable
-        data object Joined : Event()
-        @Serializable
-        data object Left : Event()
-        @Serializable
-        data class DataShared(val bas64Payload: String) : Event()
-    }
-}
-
 /**
  * Messages that can be sent/received over the peer network.
  */

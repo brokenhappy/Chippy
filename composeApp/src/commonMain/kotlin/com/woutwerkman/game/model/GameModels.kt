@@ -121,111 +121,132 @@ enum class VoteChoice {
 }
 
 /**
- * CRDT Events for state synchronization
+ * CRDT Events for state synchronization.
+ * Each event has a unique eventId for deduplication.
  */
 @Serializable
 sealed class GameEvent {
     abstract val timestamp: Long
     abstract val sourcePlayerId: String
-    
+    abstract val eventId: String
+
     @Serializable
     data class ButtonPress(
         override val timestamp: Long,
         override val sourcePlayerId: String,
         val targetPlayerId: String,
-        val delta: Int // -2 for own button, +1 for others
+        val delta: Int, // -2 for own button, +1 for others
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class PlayerJoined(
         override val timestamp: Long,
         override val sourcePlayerId: String,
         val player: Player,
-        val initialValue: Int
+        val initialValue: Int,
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class PlayerLeft(
         override val timestamp: Long,
         override val sourcePlayerId: String,
-        val playerId: String
+        val playerId: String,
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class ReadyStateChanged(
         override val timestamp: Long,
         override val sourcePlayerId: String,
-        val isReady: Boolean
+        val isReady: Boolean,
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class GameStarted(
         override val timestamp: Long,
-        override val sourcePlayerId: String
+        override val sourcePlayerId: String,
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class VoteCast(
         override val timestamp: Long,
         override val sourcePlayerId: String,
-        val choice: VoteChoice
+        val choice: VoteChoice,
+        override val eventId: String = generateId()
     ) : GameEvent()
-    
+
     @Serializable
     data class PhaseChanged(
         override val timestamp: Long,
         override val sourcePlayerId: String,
-        val newPhase: GamePhase
+        val newPhase: GamePhase,
+        override val eventId: String = generateId()
     ) : GameEvent()
 }
 
 /**
- * Network messages for P2P communication
+ * Network messages for P2P communication.
+ * Each message has a unique messageId for deduplication.
  */
 @Serializable
 sealed class NetworkMessage {
+    abstract val messageId: String
+
     @Serializable
     data class Discovery(
-        val peer: DiscoveredPeer
+        val peer: DiscoveredPeer,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class ConnectionRequestMsg(
-        val request: ConnectionRequest
+        val request: ConnectionRequest,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class ConnectionResponse(
         val fromPlayerId: String,
         val accepted: Boolean,
-        val lobbyState: LobbyState? = null // Include lobby state when accepted so requester can join
+        val lobbyState: LobbyState? = null,
+        val gameState: GameState? = null,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class GameEventMsg(
-        val event: GameEvent
+        val event: GameEvent,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class StateSync(
         val lobbyState: LobbyState,
-        val gameState: GameState
+        val gameState: GameState,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class Ping(
-        val timestamp: Long
+        val timestamp: Long,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
-    
+
     @Serializable
     data class Pong(
         val originalTimestamp: Long,
-        val responseTimestamp: Long
+        val responseTimestamp: Long,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
 
     @Serializable
     data class PeerLeaving(
-        val peerId: String
+        val peerId: String,
+        override val messageId: String = generateId()
     ) : NetworkMessage()
 }
 

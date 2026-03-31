@@ -18,6 +18,14 @@ class AndroidLauncher(
             "adb", "-s", emulatorId, "uninstall", "com.woutwerkman"
         ).start().waitFor()
 
+        // Set up port forwarding for emulator connectivity
+        if (emulatorId.startsWith("emulator-")) {
+            ProcessBuilder(
+                "adb", "-s", emulatorId, "reverse", "tcp:47391", "tcp:47391"
+            ).start().waitFor()
+            println("[android-$emulatorId] Set up adb reverse for port 47391")
+        }
+
         // Install APK (synchronous)
         val installResult = ProcessBuilder(
             "adb", "-s", emulatorId, "install", "-r", apkPath
@@ -45,7 +53,7 @@ class AndroidLauncher(
 
         // Return ProcessBuilder for logcat to capture output
         return ProcessBuilder(
-            "adb", "-s", emulatorId, "logcat", "ConnectivityTest:I", "PeerNet:I", "*:S"
+            "adb", "-s", emulatorId, "logcat", "ConnectivityTest:I", "PeerNet:I", "System.out:I", "*:S"
         ).redirectErrorStream(true)
     }
 

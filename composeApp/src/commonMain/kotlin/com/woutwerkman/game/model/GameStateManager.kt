@@ -54,8 +54,8 @@ class GameStateManager(
     }
     
     fun applyEvent(event: GameEvent): Boolean {
-        // Check for duplicate events (idempotency)
-        if (eventLog.any { it.timestamp == event.timestamp && it.sourcePlayerId == event.sourcePlayerId }) {
+        // Check for duplicate events by eventId (idempotency)
+        if (eventLog.any { it.eventId == event.eventId }) {
             return false
         }
         

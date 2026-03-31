@@ -8,7 +8,6 @@ import kotlinx.serialization.json.Json
 
 /**
  * Manages P2P network communication for the game.
- * Uses WebSocket-based communication for peer-to-peer connections.
  */
 class NetworkManager(
     private val localPlayer: Player,
@@ -16,23 +15,23 @@ class NetworkManager(
 ) {
     // Callback when our connection request is accepted
     var onConnectionAccepted: ((LobbyState) -> Unit)? = null
-    private val json = Json { 
-        ignoreUnknownKeys = true 
+    private val json = Json {
+        ignoreUnknownKeys = true
         encodeDefaults = true
     }
-    
+
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    
+
     private val _discoveredPeers = MutableStateFlow<List<DiscoveredPeer>>(emptyList())
     val discoveredPeers: StateFlow<List<DiscoveredPeer>> = _discoveredPeers.asStateFlow()
 
     // Track when we last saw each peer for timeout
     private val peerLastSeen = mutableMapOf<String, Long>()
     private val PEER_TIMEOUT_MS = 10_000L // Remove peers not seen for 10 seconds
-    
+
     private val _connectedPeers = MutableStateFlow<Set<String>>(emptySet())
     val connectedPeers: StateFlow<Set<String>> = _connectedPeers.asStateFlow()
-    
+
     private val _pendingRequests = MutableStateFlow<List<ConnectionRequest>>(emptyList())
     val pendingRequests: StateFlow<List<ConnectionRequest>> = _pendingRequests.asStateFlow()
 
@@ -42,26 +41,24 @@ class NetworkManager(
 
     private val _isHosting = MutableStateFlow(false)
     val isHosting: StateFlow<Boolean> = _isHosting.asStateFlow()
-    
+
     // Platform-specific transport will be injected
     private var transport: NetworkTransport? = null
-    
+
+    // Message deduplication: bounded set of recently seen messageIds
+    private val seenMessageIds = LinkedHashSet<String>()
+    private val MAX_SEEN_MESSAGES = 500
+
     fun setTransport(transport: NetworkTransport) {
         this.transport = transport
         transport.setMessageHandler { message ->
             handleMessage(message)
         }
     }
-    
+
     fun startDiscovery() {
         scope.launch {
             transport?.startDiscovery()
-
-            // Broadcast our presence periodically
-            while (isActive) {
-                broadcastPresence()
-                delay(2000)
-            }
         }
 
         // Start peer timeout checker
@@ -75,32 +72,30 @@ class NetworkManager(
                         peers.filter { it.id !in timedOutPeers }
                     }
                     timedOutPeers.forEach { peerLastSeen.remove(it) }
-                    // Also remove pending requests from timed out peers
                     _pendingRequests.update { requests ->
                         requests.filter { it.fromPlayer.id !in timedOutPeers }
                     }
                 }
             }
         }
+
+        // Periodic state sync heartbeat for CRDT convergence
+        scope.launch {
+            while (isActive) {
+                delay(5000)
+                if (_connectedPeers.value.isNotEmpty()) {
+                    broadcastStateSync()
+                }
+            }
+        }
     }
-    
+
     fun stopDiscovery() {
         scope.launch {
             transport?.stopDiscovery()
         }
     }
-    
-    private suspend fun broadcastPresence() {
-        val peer = DiscoveredPeer(
-            id = localPlayer.id,
-            name = localPlayer.name,
-            address = transport?.getLocalAddress() ?: "unknown",
-            port = transport?.getLocalPort() ?: 0
-        )
-        val message = NetworkMessage.Discovery(peer)
-        transport?.broadcast(json.encodeToString(message))
-    }
-    
+
     fun requestConnection(peer: DiscoveredPeer) {
         scope.launch {
             val request = ConnectionRequest(
@@ -109,20 +104,17 @@ class NetworkManager(
                 timestamp = currentTimeMillis()
             )
             val message = NetworkMessage.ConnectionRequestMsg(request)
-            // Send to discovery port since that's where peers are listening
-            transport?.sendTo(peer.address, DISCOVERY_PORT, json.encodeToString(message))
+            sendWithRetry(peer.address, peer.port, json.encodeToString(message))
 
-            // Track this as a pending sent invite
             _sentInvites.update { it + peer.id }
         }
     }
-    
+
     fun acceptConnection(request: ConnectionRequest) {
         scope.launch {
             _pendingRequests.update { it - request }
             _connectedPeers.update { it + request.fromPlayer.id }
 
-            // Add them to the lobby first
             val event = GameEvent.PlayerJoined(
                 timestamp = currentTimeMillis(),
                 sourcePlayerId = localPlayer.id,
@@ -131,25 +123,23 @@ class NetworkManager(
             )
             gameStateManager.applyEvent(event)
 
-            // Send response with current lobby state so they can join
             val response = NetworkMessage.ConnectionResponse(
                 fromPlayerId = localPlayer.id,
                 accepted = true,
-                lobbyState = gameStateManager.lobbyState.value
+                lobbyState = gameStateManager.lobbyState.value,
+                gameState = gameStateManager.gameState.value
             )
 
-            // Find the peer's address
             val peer = _discoveredPeers.value.find { it.id == request.fromPlayer.id }
             if (peer != null) {
-                // Send response to discovery port since that's where peers are listening
-                transport?.sendTo(peer.address, DISCOVERY_PORT, json.encodeToString(response))
-                transport?.connectTo(peer.address, DISCOVERY_PORT)
+                sendWithRetry(peer.address, peer.port, json.encodeToString(response))
+                transport?.connectTo(peer.address, peer.port)
             }
 
             broadcastEvent(event)
         }
     }
-    
+
     fun rejectConnection(request: ConnectionRequest) {
         scope.launch {
             _pendingRequests.update { it - request }
@@ -161,18 +151,24 @@ class NetworkManager(
 
             val peer = _discoveredPeers.value.find { it.id == request.fromPlayer.id }
             if (peer != null) {
-                transport?.sendTo(peer.address, DISCOVERY_PORT, json.encodeToString(response))
+                sendWithRetry(peer.address, peer.port, json.encodeToString(response))
             }
         }
     }
-    
+
     fun broadcastEvent(event: GameEvent) {
         scope.launch {
             val message = NetworkMessage.GameEventMsg(event)
-            transport?.broadcastToConnected(json.encodeToString(message))
+            val encoded = json.encodeToString(message)
+            // Retry critical events (non-ButtonPress)
+            if (event !is GameEvent.ButtonPress) {
+                broadcastWithRetry(encoded)
+            } else {
+                transport?.broadcastToConnected(encoded)
+            }
         }
     }
-    
+
     fun broadcastStateSync() {
         scope.launch {
             val lobbyState = gameStateManager.lobbyState.value ?: return@launch
@@ -181,17 +177,54 @@ class NetworkManager(
             transport?.broadcastToConnected(json.encodeToString(message))
         }
     }
-    
+
+    /**
+     * Send a pre-encoded message to a specific peer with retries for reliability.
+     */
+    private suspend fun sendWithRetry(address: String, port: Int, encoded: String, retries: Int = 3) {
+        repeat(retries) { attempt ->
+            transport?.sendTo(address, port, encoded)
+            if (attempt < retries - 1) delay(500)
+        }
+    }
+
+    /**
+     * Broadcast a message with retries for reliability.
+     */
+    private suspend fun broadcastWithRetry(encoded: String, retries: Int = 3) {
+        repeat(retries) { attempt ->
+            transport?.broadcastToConnected(encoded)
+            if (attempt < retries - 1) delay(500)
+        }
+    }
+
+    /**
+     * Check if a message has already been seen. Returns true if it's a duplicate.
+     */
+    private fun isDuplicate(messageId: String): Boolean {
+        if (messageId in seenMessageIds) return true
+        seenMessageIds.add(messageId)
+        // Keep the set bounded
+        if (seenMessageIds.size > MAX_SEEN_MESSAGES) {
+            val iterator = seenMessageIds.iterator()
+            iterator.next()
+            iterator.remove()
+        }
+        return false
+    }
+
     private fun handleMessage(rawMessage: String) {
         try {
-            println("NetworkManager: Received raw message: ${rawMessage.take(100)}...")
-            // Try to parse as different message types
             val message = parseMessage(rawMessage)
             if (message == null) {
-                println("NetworkManager: Failed to parse message")
+                println("NetworkManager: Failed to parse message: ${rawMessage.take(100)}...")
                 return
             }
-            println("NetworkManager: Parsed as ${message::class.simpleName}")
+
+            // Deduplicate (skip for Discovery since it's high-frequency heartbeat)
+            if (message !is NetworkMessage.Discovery && isDuplicate(message.messageId)) {
+                return
+            }
 
             when (message) {
                 is NetworkMessage.Discovery -> handleDiscovery(message)
@@ -204,14 +237,12 @@ class NetworkManager(
                 is NetworkMessage.PeerLeaving -> handlePeerLeaving(message)
             }
         } catch (e: Exception) {
-            // Log error but don't crash
             println("Error handling message: ${e.message}")
         }
     }
-    
+
     private fun parseMessage(rawMessage: String): NetworkMessage? {
         return try {
-            // Try each message type
             tryParse<NetworkMessage.Discovery>(rawMessage)
                 ?: tryParse<NetworkMessage.ConnectionRequestMsg>(rawMessage)
                 ?: tryParse<NetworkMessage.ConnectionResponse>(rawMessage)
@@ -224,7 +255,7 @@ class NetworkManager(
             null
         }
     }
-    
+
     private inline fun <reified T : NetworkMessage> tryParse(rawMessage: String): T? {
         return try {
             json.decodeFromString<T>(rawMessage)
@@ -232,11 +263,10 @@ class NetworkManager(
             null
         }
     }
-    
-    private fun handleDiscovery(message: NetworkMessage.Discovery) {
-        if (message.peer.id == localPlayer.id) return // Ignore our own broadcasts
 
-        // Update last seen time
+    private fun handleDiscovery(message: NetworkMessage.Discovery) {
+        if (message.peer.id == localPlayer.id) return
+
         peerLastSeen[message.peer.id] = currentTimeMillis()
 
         _discoveredPeers.update { peers ->
@@ -248,21 +278,21 @@ class NetworkManager(
             }
         }
     }
-    
+
     private fun handleConnectionRequest(message: NetworkMessage.ConnectionRequestMsg) {
         println("NetworkManager: handleConnectionRequest from ${message.request.fromPlayer.name} (${message.request.fromPlayer.id})")
-        // Also update last seen for the requester
         peerLastSeen[message.request.fromPlayer.id] = currentTimeMillis()
         _pendingRequests.update { requests ->
-            println("NetworkManager: Adding to pendingRequests, current count: ${requests.size}")
-            val updated = requests + message.request
-            println("NetworkManager: New pendingRequests count: ${updated.size}")
-            updated
+            // Avoid duplicate requests from the same player
+            if (requests.any { it.fromPlayer.id == message.request.fromPlayer.id }) {
+                requests
+            } else {
+                requests + message.request
+            }
         }
     }
 
     private fun handlePeerLeaving(message: NetworkMessage.PeerLeaving) {
-        // Remove peer from discovered list immediately
         peerLastSeen.remove(message.peerId)
         _discoveredPeers.update { peers ->
             peers.filter { it.id != message.peerId }
@@ -272,9 +302,8 @@ class NetworkManager(
         }
         _sentInvites.update { it - message.peerId }
     }
-    
+
     private fun handleConnectionResponse(message: NetworkMessage.ConnectionResponse) {
-        // Clear from sent invites
         _sentInvites.update { it - message.fromPlayerId }
 
         if (message.accepted) {
@@ -287,21 +316,25 @@ class NetworkManager(
                 }
             }
 
-            // If lobby state was included, notify ViewModel to join lobby
+            // Sync lobby and game state from the accepting peer
             message.lobbyState?.let { lobbyState ->
+                val gameState = message.gameState
+                if (gameState != null) {
+                    gameStateManager.syncState(lobbyState, gameState)
+                }
                 onConnectionAccepted?.invoke(lobbyState)
             }
         }
     }
-    
+
     private fun handleGameEvent(message: NetworkMessage.GameEventMsg) {
         gameStateManager.applyEvent(message.event)
     }
-    
+
     private fun handleStateSync(message: NetworkMessage.StateSync) {
         gameStateManager.syncState(message.lobbyState, message.gameState)
     }
-    
+
     private fun handlePing(message: NetworkMessage.Ping) {
         scope.launch {
             val pong = NetworkMessage.Pong(
@@ -311,21 +344,21 @@ class NetworkManager(
             transport?.broadcastToConnected(json.encodeToString(pong))
         }
     }
-    
+
     fun startHosting() {
         _isHosting.value = true
         scope.launch {
             transport?.startServer()
         }
     }
-    
+
     fun stopHosting() {
         _isHosting.value = false
         scope.launch {
             transport?.stopServer()
         }
     }
-    
+
     fun disconnect() {
         scope.launch {
             val event = GameEvent.PlayerLeft(
@@ -334,12 +367,12 @@ class NetworkManager(
                 playerId = localPlayer.id
             )
             broadcastEvent(event)
-            
+
             transport?.disconnectAll()
             _connectedPeers.value = emptySet()
         }
     }
-    
+
     fun broadcastLeaving() {
         scope.launch {
             val message = NetworkMessage.PeerLeaving(localPlayer.id)

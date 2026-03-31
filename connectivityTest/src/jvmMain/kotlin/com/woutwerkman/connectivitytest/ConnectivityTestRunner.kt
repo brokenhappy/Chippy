@@ -82,9 +82,20 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
     for (platform in platformsToCheck) {
         when (platform.lowercase()) {
             "jvm" -> {
-                // Only create JVM instances if "jvm" was requested (explicitly or via default)
                 if (configs.none { it.type == TestPlatform.JVM }) {
-                    repeat(2) { i ->
+                    // When JVM is the only platform, create 2 instances to verify JVM-to-JVM.
+                    // When combined with emulators/devices, create only 1 JVM since
+                    // emulators can only reach a single known port on the host.
+                    val hasOtherPlatforms = platformsToCheck.any { it.lowercase() != "jvm" }
+                    val jvmCount = if (hasOtherPlatforms) 1 else 2
+                    val jvmTargets = if (hasOtherPlatforms) {
+                        // When testing with emulators, JVM only needs to find the other platform types
+                        platformsToCheck.mapNotNull { TestPlatform.fromString(it) }.filter { it != TestPlatform.JVM }.toSet()
+                    } else {
+                        // JVM-only test: each JVM looks for the other JVM
+                        setOf(TestPlatform.JVM)
+                    }
+                    repeat(jvmCount) { i ->
                         configs.add(
                             PlatformConfig(
                                 type = TestPlatform.JVM,
@@ -92,7 +103,7 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                                 launcher = JvmLauncher(
                                     ConnectivityTestConfig(
                                         instanceId = "jvm-${i + 1}",
-                                        targetPlatforms = platformsToCheck.mapNotNull { TestPlatform.fromString(it) }.toSet()
+                                        targetPlatforms = jvmTargets
                                     )
                                 )
                             )
@@ -327,13 +338,14 @@ fun buildIosDeviceApp(udid: String) {
         println("Using existing Xcode build from: ${xcodeDerivedDataApp.absolutePath}")
         xcodeDerivedDataApp.absolutePath
     } else {
-        // Build with Xcode
+        // Build with Xcode using -sdk iphoneos (avoids destination resolution issues)
         process = ProcessBuilder(
             "xcodebuild",
             "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
             "-scheme", "iosConnectivityTest",
             "-configuration", "Debug",
-            "-destination", "id=$udid",
+            "-sdk", "iphoneos",
+            "-arch", "arm64",
             "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
             "-allowProvisioningUpdates",
             "FRAMEWORK_SEARCH_PATHS=$rootDir/composeApp/build/bin/iosArm64/debugFramework",

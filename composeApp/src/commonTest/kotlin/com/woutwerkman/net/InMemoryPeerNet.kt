@@ -11,6 +11,10 @@ import kotlinx.coroutines.channels.Channel
  */
 class InMemoryPeerNet {
     private val peers = mutableMapOf<String, InMemoryPeer>()
+    // Bidirectional links: if (a,b) is in links, a can send to b and vice versa.
+    // Empty means full mesh (all can reach all).
+    private val links = mutableSetOf<Pair<String, String>>()
+    private var useLinks = false
 
     fun addPeer(peerId: String, displayName: String): InMemoryPeer {
         val incoming = Channel<RawPeerMessage>(Channel.BUFFERED)
@@ -22,13 +26,29 @@ class InMemoryPeerNet {
     }
 
     /**
+     * Declare that two peers can communicate directly.
+     * If any links are added, only linked peers can exchange messages.
+     * Unlinked peers are isolated from each other (like emulator vs iPhone).
+     */
+    fun link(peerIdA: String, peerIdB: String) {
+        useLinks = true
+        links.add(Pair(peerIdA, peerIdB))
+        links.add(Pair(peerIdB, peerIdA))
+    }
+
+    private fun canReach(from: String, to: String): Boolean {
+        if (!useLinks) return true
+        return links.contains(Pair(from, to))
+    }
+
+    /**
      * Connect all peers to each other by delivering Connected events.
      * Call this after adding all peers.
      */
     suspend fun connectAll() {
         for ((id, peer) in peers) {
             for ((otherId, otherPeer) in peers) {
-                if (id != otherId) {
+                if (id != otherId && canReach(id, otherId)) {
                     val peerInfo = PeerInfo(id = otherId, name = otherPeer.displayName, address = "memory", port = 0)
                     peer.incoming.send(RawPeerMessage.Event.Connected(peerInfo))
                 }
@@ -54,15 +74,17 @@ class InMemoryPeerNet {
                 is PeerCommand.Broadcast -> {
                     val payload = command.payload
                     for ((id, peer) in peers) {
-                        if (id != sender.peerId) {
+                        if (id != sender.peerId && canReach(sender.peerId, id)) {
                             peer.incoming.send(RawPeerMessage.Received(sender.peerId, payload))
                         }
                     }
                 }
                 is PeerCommand.SendTo -> {
-                    val target = peers[command.peerId]
-                    if (target != null) {
-                        target.incoming.send(RawPeerMessage.Received(sender.peerId, command.payload))
+                    if (canReach(sender.peerId, command.peerId)) {
+                        val target = peers[command.peerId]
+                        if (target != null) {
+                            target.incoming.send(RawPeerMessage.Received(sender.peerId, command.payload))
+                        }
                     }
                 }
             }

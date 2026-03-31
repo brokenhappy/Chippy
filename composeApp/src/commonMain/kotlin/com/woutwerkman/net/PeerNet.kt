@@ -1,6 +1,8 @@
 package com.woutwerkman.net
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,6 +16,11 @@ import kotlinx.serialization.Serializable
 data class PeerNetState(
     val discoveredPeers: Map<String, PeerInfo> = emptyMap(),
 )
+
+/**
+ * An application-level message received via gossip relay.
+ */
+data class AppMessage(val fromPeerId: String, val payload: String)
 
 /**
  * A connection to the peer network with collective event linearization.
@@ -39,6 +46,15 @@ interface PeerNetConnection {
      * and should not be submitted by consumers.
      */
     suspend fun submitEvent(event: PeerEvent): Boolean
+
+    /** Incoming application messages relayed via gossip. */
+    val messages: ReceiveChannel<AppMessage>
+
+    /** Broadcast an application message to all peers via gossip relay. */
+    suspend fun broadcast(payload: String)
+
+    /** Send an application message to a specific peer via gossip relay. */
+    suspend fun sendTo(targetPeerId: String, payload: String)
 }
 
 /**
@@ -81,6 +97,9 @@ suspend fun <T> withPeerNetConnection(
             override val localId: String = rawConn.localPeerId
             override val state: StateFlow<PeerNetState> = engine.state
             override suspend fun submitEvent(event: PeerEvent): Boolean = engine.submitEvent(event)
+            override val messages: ReceiveChannel<AppMessage> = engine.appMessages
+            override suspend fun broadcast(payload: String) = engine.relayBroadcast(payload)
+            override suspend fun sendTo(targetPeerId: String, payload: String) = engine.relayTo(targetPeerId, payload)
         }
         try {
             block(connection)

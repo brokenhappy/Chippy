@@ -68,6 +68,9 @@ suspend fun runStructuredConnectivityTest(
 
 /**
  * Detect which platforms are available and create configs for them.
+ *
+ * Detects non-JVM platforms first, then adds JVM targeting only the
+ * platforms that were actually found (not all possible platforms).
  */
 fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
@@ -77,51 +80,23 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
         requested
     }
 
-    val allPlatformsString = platformsToCheck.joinToString(",")
+    val includeJvm = platformsToCheck.any { it.lowercase() == "jvm" }
 
+    // Detect non-JVM platforms first so we know what JVM should target
     for (platform in platformsToCheck) {
         when (platform.lowercase()) {
-            "jvm" -> {
-                if (configs.none { it.type == TestPlatform.JVM }) {
-                    // When JVM is the only platform, create 2 instances to verify JVM-to-JVM.
-                    // When combined with emulators/devices, create only 1 JVM since
-                    // emulators can only reach a single known port on the host.
-                    val hasOtherPlatforms = platformsToCheck.any { it.lowercase() != "jvm" }
-                    val jvmCount = if (hasOtherPlatforms) 1 else 2
-                    val jvmTargets = if (hasOtherPlatforms) {
-                        // When testing with emulators, JVM only needs to find the other platform types
-                        platformsToCheck.mapNotNull { TestPlatform.fromString(it) }.filter { it != TestPlatform.JVM }.toSet()
-                    } else {
-                        // JVM-only test: each JVM looks for the other JVM
-                        setOf(TestPlatform.JVM)
-                    }
-                    repeat(jvmCount) { i ->
-                        configs.add(
-                            PlatformConfig(
-                                type = TestPlatform.JVM,
-                                instanceId = "jvm-${i + 1}",
-                                launcher = JvmLauncher(
-                                    ConnectivityTestConfig(
-                                        instanceId = "jvm-${i + 1}",
-                                        targetPlatforms = jvmTargets
-                                    )
-                                )
-                            )
-                        )
-                    }
-                }
-            }
+            "jvm" -> { /* handled after all other platforms are detected */ }
 
             "android-simulator", "android-real-device" -> {
                 val devices = getConnectedAndroidDevices()
                 val targetPlatform = TestPlatform.fromString(platform) ?: continue
-                
+
                 val matchingDevices = devices.filter { it.second == targetPlatform }
-                
+
                 if (matchingDevices.isEmpty() && requested.contains(platform)) {
                     throw IllegalStateException("No connected devices for platform: $platform")
                 }
-                
+
                 if (matchingDevices.isNotEmpty()) {
                     val apkPath = buildAndroidApkOnce()
                     matchingDevices.forEachIndexed { i, (deviceId, platformType) ->
@@ -172,6 +147,34 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                     )
                 }
             }
+        }
+    }
+
+    // Always add JVM when there are other platforms — it acts as a gossip relay
+    // for peers on isolated networks (e.g., emulator on 10.0.2.x ↔ iPhone on WiFi).
+    // The linearization engine re-broadcasts events, so all peers converge.
+    if (configs.none { it.type == TestPlatform.JVM }) {
+        val detectedNonJvmTypes = configs.map { it.type }.toSet()
+        val hasOtherPlatforms = detectedNonJvmTypes.isNotEmpty()
+        val jvmCount = if (hasOtherPlatforms) 1 else 2
+        val jvmTargets = if (hasOtherPlatforms) {
+            detectedNonJvmTypes
+        } else {
+            setOf(TestPlatform.JVM)
+        }
+        repeat(jvmCount) { i ->
+            configs.add(
+                PlatformConfig(
+                    type = TestPlatform.JVM,
+                    instanceId = "jvm-${i + 1}",
+                    launcher = JvmLauncher(
+                        ConnectivityTestConfig(
+                            instanceId = "jvm-${i + 1}",
+                            targetPlatforms = jvmTargets
+                        )
+                    )
+                )
+            )
         }
     }
 

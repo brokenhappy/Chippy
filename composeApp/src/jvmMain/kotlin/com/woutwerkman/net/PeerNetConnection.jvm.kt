@@ -56,7 +56,7 @@ private fun generatePeerId(): String {
  * Tracks the state of a discovered peer through the handshake process.
  */
 private data class PeerState(
-    val info: PeerInfo,
+    var info: PeerInfo,
     var weSeeThemViaDiscovery: Boolean = false,  // We found them via mDNS/dns-sd
     var weSentHello: Boolean = false,             // We sent HELLO to them
     var theyAckedUs: Boolean = false,             // They sent ACK (confirming they see us)
@@ -284,9 +284,12 @@ private class JvmPeerTransport(
                             handleAckReceived(fromPeerId)
                         }
                         else -> {
-                            // Application data - only forward if peer is joined
+                            // Application data - forward if we've seen this peer at all
+                            // (don't require full handshake completion, as the linearization
+                            // engine sends state immediately on Connected which may arrive
+                            // before the other side completes its handshake)
                             val state = peerStates[fromPeerId]
-                            if (state?.isJoined == true) {
+                            if (state != null) {
                                 incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
                             }
                         }
@@ -330,6 +333,9 @@ private class JvmPeerTransport(
                 println("[PeerNet-$peerId] Received HELLO from new peer: $pName ($fromPeerId)")
                 PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
             } else {
+                // Update address/port — the HELLO may have a better address than mDNS
+                // (e.g., emulator NAT-mapped address replaces unreachable 10.0.2.15)
+                existing.info = peerInfo
                 existing.weSeeThemViaDiscovery = true
                 existing
             }
@@ -394,13 +400,13 @@ private class JvmPeerTransport(
             when (command) {
                 is PeerCommand.SendTo -> {
                     val state = peerStates[command.peerId]
-                    if (state?.isJoined == true) {
+                    if (state != null) {
                         val payload = "$peerId:${String(command.payload, Charsets.UTF_8)}"
                         sendUdp(state.info.address, state.info.port, payload)
                     }
                 }
                 is PeerCommand.Broadcast -> {
-                    peerStates.values.filter { it.isJoined }.forEach { state ->
+                    peerStates.values.forEach { state ->
                         val payload = "$peerId:${String(command.payload, Charsets.UTF_8)}"
                         sendUdp(state.info.address, state.info.port, payload)
                     }

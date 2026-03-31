@@ -221,9 +221,10 @@ private class IosPeerNetConnectionImpl(
                                         handleAckReceived(fromPeerId)
                                     }
                                     else -> {
-                                        // Application data
+                                        // Forward if we've seen this peer at all (don't require full
+                                        // handshake, as linearization state may arrive before handshake completes)
                                         val state = peerStates[fromPeerId]
-                                        if (state?.isJoined == true) {
+                                        if (state != null) {
                                             scope.launch {
                                                 incoming.send(RawPeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
                                             }
@@ -363,13 +364,13 @@ private class IosPeerNetConnectionImpl(
         when (command) {
             is PeerCommand.SendTo -> {
                 val state = peerStates[command.peerId]
-                if (state?.isJoined == true) {
+                if (state != null) {
                     val payload = "$peerId:${command.payload.decodeToString()}"
                     sendUdp(state.info.address, state.info.port, payload)
                 }
             }
             is PeerCommand.Broadcast -> {
-                peerStates.values.filter { it.isJoined }.forEach { state ->
+                peerStates.values.forEach { state ->
                     val payload = "$peerId:${command.payload.decodeToString()}"
                     sendUdp(state.info.address, state.info.port, payload)
                 }

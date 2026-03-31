@@ -166,6 +166,48 @@ class LinearizationEngineTest {
         routingJob.cancel()
     }
 
+    /**
+     * Models emulator↔iPhone scenario: A and C can't reach each other directly,
+     * but B (the host/JVM) can reach both. B gossips events so A and C converge.
+     */
+    @Test
+    fun gossipRelayThroughBridge() = runTest {
+        val net = InMemoryPeerNet()
+        val peerA = net.addPeer("peer-a", "Emulator")
+        val peerB = net.addPeer("peer-b", "JVM-Host")
+        val peerC = net.addPeer("peer-c", "iPhone")
+
+        // A↔B and B↔C, but NOT A↔C
+        net.link("peer-a", "peer-b")
+        net.link("peer-b", "peer-c")
+
+        var clock = 1000L
+        val engineA = LinearizationEngine(peerA.raw, "Emulator") { clock++ }
+        val engineB = LinearizationEngine(peerB.raw, "JVM-Host") { clock++ }
+        val engineC = LinearizationEngine(peerC.raw, "iPhone") { clock++ }
+
+        val routingJob = net.startRouting(this)
+        val jobA = launch { engineA.start() }
+        val jobB = launch { engineB.start() }
+        val jobC = launch { engineC.start() }
+
+        yield()
+        net.connectAll()
+
+        // A and C should both see all 3 peers — even though they can't talk directly
+        val stateA = engineA.state.first { it.discoveredPeers.size >= 3 }
+        val stateC = engineC.state.first { it.discoveredPeers.size >= 3 }
+
+        assertEquals(setOf("peer-a", "peer-b", "peer-c"), stateA.discoveredPeers.keys)
+        assertEquals(setOf("peer-a", "peer-b", "peer-c"), stateC.discoveredPeers.keys)
+
+        net.close()
+        jobA.cancel()
+        jobB.cancel()
+        jobC.cancel()
+        routingJob.cancel()
+    }
+
     @Test
     fun timestampOrderingIsDeterministic() = runTest {
         val net = InMemoryPeerNet()

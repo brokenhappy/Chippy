@@ -56,7 +56,7 @@ private fun generatePeerId(): String {
  * Tracks the state of a discovered peer through the handshake process.
  */
 private data class PeerState(
-    val info: PeerInfo,
+    var info: PeerInfo,
     var weSeeThemViaDiscovery: Boolean = false,
     var weSentHello: Boolean = false,
     var theyAckedUs: Boolean = false,
@@ -239,8 +239,10 @@ private class AndroidPeerTransport(
                         payload.startsWith(HANDSHAKE_HELLO) -> handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "", packet.port)
                         payload.startsWith(HANDSHAKE_ACK) -> handleAckReceived(fromPeerId)
                         else -> {
+                            // Forward if we've seen this peer at all (don't require full
+                            // handshake, as linearization state may arrive before handshake completes)
                             val state = peerStates[fromPeerId]
-                            if (state?.isJoined == true) {
+                            if (state != null) {
                                 incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
                             }
                         }
@@ -282,7 +284,7 @@ private class AndroidPeerTransport(
         val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
         val state = peerStates.compute(fromPeerId) { _, existing ->
             if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
-            else { existing.weSeeThemViaDiscovery = true; existing }
+            else { existing.info = peerInfo; existing.weSeeThemViaDiscovery = true; existing }
         }!!
         // Always send ACK in reply to HELLO — the peer may have missed our earlier ACK
         sendHandshakeAck(peerInfo)
@@ -329,12 +331,12 @@ private class AndroidPeerTransport(
         for (command in outgoingChannel) {
             when (command) {
                 is PeerCommand.SendTo -> {
-                    peerStates[command.peerId]?.takeIf { it.isJoined }?.let {
+                    peerStates[command.peerId]?.let {
                         sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                     }
                 }
                 is PeerCommand.Broadcast -> {
-                    peerStates.values.filter { it.isJoined }.forEach {
+                    peerStates.values.forEach {
                         sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                     }
                 }

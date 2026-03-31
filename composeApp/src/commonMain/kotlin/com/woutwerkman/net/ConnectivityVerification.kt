@@ -13,6 +13,8 @@ enum class TestPlatform {
     IOS_SIMULATOR,
     IOS_REAL_DEVICE;
 
+    fun toPlatformString(): String = name.lowercase().replace('_', '-')
+
     companion object {
         fun fromString(s: String): TestPlatform? = when (s.lowercase().trim()) {
             "jvm" -> JVM

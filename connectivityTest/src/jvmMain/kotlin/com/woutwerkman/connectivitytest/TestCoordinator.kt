@@ -41,9 +41,11 @@ class TestCoordinator(
                 platforms.forEach { platform ->
                     launch {
                         // Any exception here will cancel all siblings and propagate up
+                        // Each platform targets only the OTHER platform types
+                        val otherTypes = platforms.map { it.type }.toSet() - platform.type
                         platform.launcher.launch(
                             instanceId = platform.instanceId,
-                            platformsString = platforms.joinToString(",") { it.type.toString().lowercase() },
+                            platformsString = otherTypes.joinToString(",") { it.toPlatformString() },
                             onAppStarted = {
                                 logger("[${platform.instanceId}] App started")
                                 // Start timeout when all apps have started

@@ -1,6 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.time.Duration
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -177,10 +178,33 @@ tasks.register("printJvmClasspath") {
     }
 }
 
-// Main task to orchestrate the connectivity test
-tasks.register("testConnectibility") {
+// Main task to orchestrate the connectivity test using the new coordinator
+tasks.register<JavaExec>("testConnectibility") {
     group = "verification"
     description = "Test network connectivity between platforms"
+
+    // Set a timeout to prevent it from hanging forever in CI
+    timeout.set(Duration.ofSeconds(60))
+
+    val jvmCompilation = kotlin.targets.getByName("jvm").compilations.getByName("main")
+    val runtimeFiles = jvmCompilation.runtimeDependencyFiles ?: files()
+    classpath = runtimeFiles + jvmCompilation.output.allOutputs
+    mainClass.set("com.woutwerkman.connectivitytest.ConnectivityTestRunnerKt")
+    systemProperty("project.root", rootDir.absolutePath)
+
+    // Pass platforms as command-line argument if specified
+    val platformsArg = project.findProperty("platforms")?.toString() ?: ""
+    if (platformsArg.isNotEmpty()) {
+        args(platformsArg)
+    }
+
+    dependsOn(":connectivityTest:jvmMainClasses")
+}
+
+// Legacy task - kept for compatibility but with old implementation
+tasks.register("testConnectibilityOld") {
+    group = "connectivity-test"
+    description = "Old connectivity test implementation (deprecated)"
 
     // Capture config-time values
     val platformsArg = project.findProperty("platforms")?.toString() ?: ""

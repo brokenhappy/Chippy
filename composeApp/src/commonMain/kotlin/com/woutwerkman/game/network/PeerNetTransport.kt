@@ -5,7 +5,6 @@ import com.woutwerkman.game.model.NetworkMessage
 import com.woutwerkman.net.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
@@ -41,8 +40,8 @@ class PeerNetTransport(
 
         val config = PeerNetConfig(
             serviceName = "chippy",
-            displayName = peerName,
-            discoveryTimeoutMs = Long.MAX_VALUE // Run indefinitely
+            displayName = peerName
+            // Run indefinitely
         )
 
         // Launch the connection in a new coroutine
@@ -73,7 +72,7 @@ class PeerNetTransport(
                     // Process incoming messages
                     for (message in conn.incoming) {
                         when (message) {
-                            is PeerMessage.Event.Joined -> {
+                            is PeerMessage.Event.Connected -> {
                                 println("PeerNetTransport: Peer joined ${message.peer.name} (${message.peer.id})")
                                 discoveredPeers.value = discoveredPeers.value + (message.peer.id to message.peer)
 
@@ -87,7 +86,7 @@ class PeerNetTransport(
                                 val discoveryMsg = NetworkMessage.Discovery(discoveryPeer)
                                 messageHandler?.invoke(json.encodeToString(discoveryMsg))
                             }
-                            is PeerMessage.Event.Left -> {
+                            is PeerMessage.Event.Disconnected -> {
                                 println("PeerNetTransport: Peer left ${message.peerId}")
                                 discoveredPeers.value = discoveredPeers.value - message.peerId
 

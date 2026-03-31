@@ -7,11 +7,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
-import com.woutwerkman.net.PeerNetConfig
-import com.woutwerkman.net.PeerMessage
-import com.woutwerkman.net.withPeerNetConnection
+import com.woutwerkman.net.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.ClosedReceiveChannelException
 
 class MainActivity : ComponentActivity() {
     private var testScope: CoroutineScope? = null
@@ -23,11 +20,11 @@ class MainActivity : ComponentActivity() {
         // Check if we're in connectivity test mode
         val isTestMode = intent.getBooleanExtra("connectivity_test", false)
         val instanceId = intent.getStringExtra("instanceId") ?: "android-1"
-        val platforms = intent.getStringExtra("platforms") ?: "jvm,android-simulator"
+        val platformsStr = intent.getStringExtra("platforms") ?: "jvm,android-simulator"
 
         if (isTestMode) {
             Log.i("ConnectivityTest", "[$instanceId] Starting connectivity test mode")
-            runConnectivityTest(instanceId, platforms)
+            runAndroidConnectivityTest(instanceId, platformsStr)
         } else {
             setContent {
                 App()
@@ -35,96 +32,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun runConnectivityTest(instanceId: String, platforms: String) {
+    private fun runAndroidConnectivityTest(instanceId: String, platformsStr: String) {
         testScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+        val targetPlatforms = platformsStr.split(",")
+            .mapNotNull { TestPlatform.fromString(it) }
+            .toSet()
+
+        val config = ConnectivityTestConfig(
+            instanceId = instanceId,
+            targetPlatforms = targetPlatforms
+        )
+
         testScope?.launch {
-            try {
-                withTimeout(60_000) {
-                    withPeerNetConnection(
-                        PeerNetConfig(
-                            serviceName = "chippy",
-                            displayName = instanceId,
-                            discoveryTimeoutMs = 30_000
-                        )
-                    ) { connection ->
-                        val discoveredPeers = mutableMapOf<String, String>()
-                        val targetPlatforms = platforms.split(",").map { it.trim().lowercase() }.toSet()
-                        val discoveredPlatforms = mutableSetOf<String>()
-
-                        val startTime = System.currentTimeMillis()
-                        val timeout = 30_000L
-
-                        Log.i("ConnectivityTest", "[$instanceId] Looking for platforms: $targetPlatforms")
-
-                        while (isActive) {
-                            if (System.currentTimeMillis() - startTime > timeout) {
-                                break
-                            }
-
-                            val message = withTimeoutOrNull(1000) {
-                                try {
-                                    connection.incoming.receive()
-                                } catch (e: ClosedReceiveChannelException) {
-                                    null
-                                }
-                            }
-
-                            when (message) {
-                                is PeerMessage.Event.Discovered -> {
-                                    val peer = message.peer
-                                    Log.i("ConnectivityTest", "[$instanceId] Discovered: ${peer.name} (${peer.id})")
-                                    discoveredPeers[peer.id] = peer.name
-
-                                    // Determine platform from peer ID prefix
-                                    val platform = when {
-                                        peer.id.startsWith("jvm-") -> "jvm"
-                                        peer.id.startsWith("android-") -> "android-simulator"
-                                        peer.id.startsWith("ios-") -> "ios-real-device" // Could be either
-                                        else -> null
-                                    }
-
-                                    if (platform != null) {
-                                        // Check for matching platform (ios-real-device and ios-simulator are compatible)
-                                        val matchingPlatform = when {
-                                            platform in targetPlatforms -> platform
-                                            platform == "ios-real-device" && "ios-simulator" in targetPlatforms -> "ios-simulator"
-                                            platform == "ios-simulator" && "ios-real-device" in targetPlatforms -> "ios-real-device"
-                                            else -> null
-                                        }
-                                        if (matchingPlatform != null) {
-                                            discoveredPlatforms.add(matchingPlatform)
-                                            Log.i("ConnectivityTest", "[$instanceId] Platform found: $matchingPlatform (${discoveredPlatforms.size}/${targetPlatforms.size})")
-                                        }
-                                    }
-
-                                    if (discoveredPlatforms.containsAll(targetPlatforms)) {
-                                        Log.i("ConnectivityTest", "[$instanceId] SUCCESS: All platforms discovered!")
-                                        setResult(RESULT_OK)
-                                        finish()
-                                        return@withPeerNetConnection
-                                    }
-                                }
-                                is PeerMessage.Event.Lost -> {
-                                    Log.i("ConnectivityTest", "[$instanceId] Lost peer: ${message.peerId}")
-                                    discoveredPeers.remove(message.peerId)
-                                }
-                                else -> { /* ignore */ }
-                            }
-                        }
-
-                        val missing = targetPlatforms - discoveredPlatforms
-                        Log.e("ConnectivityTest", "[$instanceId] FAILURE: Missing platforms: $missing")
-                        Log.e("ConnectivityTest", "[$instanceId] Discovered ${discoveredPeers.size} peers")
-                        setResult(RESULT_CANCELED)
-                        finish()
-                    }
+            val result = runConnectivityTest(config)
+            when (result) {
+                is ConnectivityTestResult.Success -> {
+                    Log.i("ConnectivityTest", "[$instanceId] SUCCESS: Connectivity test passed!")
+                    setResult(RESULT_OK)
                 }
-            } catch (e: Exception) {
-                Log.e("ConnectivityTest", "[$instanceId] ERROR: ${e.message}", e)
-                setResult(RESULT_CANCELED)
-                finish()
+                is ConnectivityTestResult.Failure -> {
+                    Log.e("ConnectivityTest", "[$instanceId] FAILURE: ${result.message}")
+                    setResult(RESULT_CANCELED)
+                }
             }
+            finish()
         }
     }
 

@@ -1,5 +1,6 @@
 package com.woutwerkman.connectivitytest
 
+import com.woutwerkman.net.*
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
 
@@ -22,7 +23,7 @@ fun main() {
     val config = ConnectivityTestConfig(
         instanceId = instanceId,
         targetPlatforms = targetPlatforms,
-        timeoutMs = 60_000
+        testTimeoutMs = 60_000
     )
 
     val result = runBlocking {

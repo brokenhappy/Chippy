@@ -12,7 +12,12 @@ import javax.jmdns.ServiceInfo
 import javax.jmdns.ServiceListener
 import kotlin.random.Random
 
-private const val DISCOVERY_PORT = 41234
+private const val MESSAGE_PORT = 47391
+
+// Internal protocol prefixes - hidden from consumers
+private const val HANDSHAKE_PREFIX = "_PN_HS_"
+private const val HANDSHAKE_HELLO = "${HANDSHAKE_PREFIX}HELLO|"
+private const val HANDSHAKE_ACK = "${HANDSHAKE_PREFIX}ACK|"
 
 internal actual suspend fun <T> withPeerNetConnectionImpl(
     config: PeerNetConfig,
@@ -47,6 +52,18 @@ private fun generatePeerId(): String {
     return "android-${timestamp.toString(36)}-$random"
 }
 
+/**
+ * Tracks the state of a discovered peer through the handshake process.
+ */
+private data class PeerState(
+    val info: PeerInfo,
+    var weSeeThemViaDiscovery: Boolean = false,
+    var weSentHello: Boolean = false,
+    var theyAckedUs: Boolean = false,
+    var weAckedThem: Boolean = false,
+    var isJoined: Boolean = false
+)
+
 private class AndroidPeerTransport(
     private val peerId: String,
     private val peerName: String,
@@ -56,26 +73,31 @@ private class AndroidPeerTransport(
 ) {
     private var jmdns: JmDNS? = null
     private var serviceInfo: ServiceInfo? = null
-    private var discoverySocket: DatagramSocket? = null
+    private var udpSocket: DatagramSocket? = null
     private var isRunning = false
-    private val discoveredPeers = ConcurrentHashMap<String, PeerInfo>()
+    private val peerStates = ConcurrentHashMap<String, PeerState>()
     private val serviceType = "_${serviceName}._udp.local."
     private var localAddress: String = "0.0.0.0"
+    private var localPort: Int = 0
+    private var scope: CoroutineScope? = null
 
     fun start(scope: CoroutineScope) {
+        this.scope = scope
         isRunning = true
 
         scope.launch(Dispatchers.IO) {
             try {
                 localAddress = getLocalIpAddress()
-                println("[Android-$peerId] Local IP: $localAddress")
+                println("[PeerNet-$peerId] Local IP: $localAddress")
 
-                // Start UDP socket for direct messaging
-                discoverySocket = DatagramSocket(null).apply {
+                // Start UDP socket for messaging - use port 0 to let OS assign
+                udpSocket = DatagramSocket(0).apply {
                     reuseAddress = true
                     broadcast = true
-                    bind(InetSocketAddress(DISCOVERY_PORT))
+                    soTimeout = 100
                 }
+                localPort = udpSocket!!.localPort
+                println("[PeerNet-$peerId] Bound to port $localPort")
 
                 // Start mDNS
                 startMdns(this)
@@ -86,9 +108,31 @@ private class AndroidPeerTransport(
                 // Process outgoing commands
                 launch { processOutgoingCommands() }
 
+                // Handshake maintenance
+                launch { handshakeMaintenance() }
+
             } catch (e: Exception) {
-                println("[Android-$peerId] Error starting transport: ${e.message}")
+                println("[PeerNet-$peerId] Error starting: ${e.message}")
                 e.printStackTrace()
+            }
+        }
+    }
+
+    private suspend fun handshakeMaintenance() {
+        while (isRunning) {
+            delay(1000)
+            
+            // Emulator-to-Host proactive discovery
+            if (localAddress == "10.0.2.15") {
+                // Try common default port as a fallback
+                sendUdp("10.0.2.2", MESSAGE_PORT, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
+            }
+
+            peerStates.values.forEach { state ->
+                if (state.weSeeThemViaDiscovery && !state.isJoined) {
+                    sendHandshakeHello(state.info)
+                    state.weSentHello = true
+                }
             }
         }
     }
@@ -97,163 +141,191 @@ private class AndroidPeerTransport(
         try {
             val addr = InetAddress.getByName(localAddress)
             jmdns = JmDNS.create(addr, "peer-android-$peerId")
-            println("[Android-$peerId] JmDNS created")
-
-            // Add service listener BEFORE registering our service to catch early announcements
+            
             jmdns?.addServiceListener(serviceType, object : ServiceListener {
                 override fun serviceAdded(event: ServiceEvent) {
-                    println("[Android-$peerId] Service added: ${event.name}")
                     jmdns?.requestServiceInfo(event.type, event.name, true)
                 }
 
                 override fun serviceRemoved(event: ServiceEvent) {
-                    println("[Android-$peerId] Service removed: ${event.name}")
-                    val parts = event.name.split("|")
-                    if (parts.size >= 2) {
-                        val removedPeerId = parts[1]
-                        if (removedPeerId != peerId && discoveredPeers.remove(removedPeerId) != null) {
-                            runBlocking {
-                                incomingChannel.send(PeerMessage.Event.Lost(removedPeerId))
-                            }
-                        }
-                    }
+                    handlePeerRemoved(event.name)
                 }
 
                 override fun serviceResolved(event: ServiceEvent) {
-                    println("[Android-$peerId] Service resolved: ${event.name}")
-                    val parts = event.name.split("|")
-                    if (parts.size >= 3) {
-                        val pName = parts[0]
-                        val pId = parts[1]
-                        val pAddr = parts[2]
-
-                        if (pId != peerId && !discoveredPeers.containsKey(pId)) {
-                            val peerInfo = PeerInfo(
-                                id = pId,
-                                name = pName,
-                                address = pAddr,
-                                port = DISCOVERY_PORT
-                            )
-                            discoveredPeers[pId] = peerInfo
-                            runBlocking {
-                                incomingChannel.send(PeerMessage.Event.Discovered(peerInfo))
-                            }
-                        }
-                    }
+                    handlePeerDiscovered(event.name)
                 }
             })
 
-            // Service name format: displayName|peerId|address
-            val fullServiceName = "$peerName|$peerId|$localAddress"
-            serviceInfo = ServiceInfo.create(
-                serviceType,
-                fullServiceName,
-                DISCOVERY_PORT,
-                "PeerNet"
-            )
+            val fullServiceName = "$peerName|$peerId|$localAddress|$localPort"
+            serviceInfo = ServiceInfo.create(serviceType, fullServiceName, localPort, "PeerNet")
             jmdns?.registerService(serviceInfo)
-            println("[Android-$peerId] mDNS service registered: $fullServiceName")
+            println("[PeerNet-$peerId] mDNS service registered: $fullServiceName")
 
-            // Periodically query for services to catch late arrivals
+            // Fallback query
             scope.launch {
                 while (isRunning) {
-                    delay(2000) // Query every 2 seconds
+                    delay(5000)
                     try {
                         val services = jmdns?.list(serviceType)
-                        services?.forEach { info ->
-                            val parts = info.name.split("|")
-                            if (parts.size >= 3) {
-                                val pName = parts[0]
-                                val pId = parts[1]
-                                val pAddr = parts[2]
-
-                                if (pId != peerId && !discoveredPeers.containsKey(pId)) {
-                                    println("[Android-$peerId] Found service via list: ${info.name}")
-                                    val peerInfo = PeerInfo(
-                                        id = pId,
-                                        name = pName,
-                                        address = pAddr,
-                                        port = DISCOVERY_PORT
-                                    )
-                                    discoveredPeers[pId] = peerInfo
-                                    incomingChannel.send(PeerMessage.Event.Discovered(peerInfo))
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Ignore query errors
-                    }
+                        services?.forEach { handlePeerDiscovered(it.name) }
+                    } catch (e: Exception) {}
                 }
             }
         } catch (e: Exception) {
-            println("[Android-$peerId] Error starting mDNS: ${e.message}")
-            e.printStackTrace()
+            println("[PeerNet-$peerId] Error starting mDNS: ${e.message}")
+        }
+    }
+
+    private fun handlePeerDiscovered(serviceName: String) {
+        val parts = serviceName.split("|")
+        if (parts.size >= 3) {
+            val pName = parts[0]
+            val pId = parts[1]
+            val pAddr = parts[2]
+            val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+            if (pId == peerId) return
+
+            val peerInfo = PeerInfo(id = pId, name = pName, address = pAddr, port = pPort)
+            peerStates.compute(pId) { _, existing ->
+                if (existing == null) {
+                    println("[PeerNet-$peerId] Peer discovered: $pName ($pId)")
+                    PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
+                } else {
+                    existing.weSeeThemViaDiscovery = true
+                    existing
+                }
+            }
+            sendHandshakeHello(peerInfo)
+        }
+    }
+
+    private fun handlePeerRemoved(serviceName: String) {
+        val parts = serviceName.split("|")
+        if (parts.size >= 2) {
+            val pId = parts[1]
+            val state = peerStates.remove(pId)
+            if (state?.isJoined == true) {
+                scope?.launch {
+                    incomingChannel.send(PeerMessage.Event.Disconnected(pId))
+                }
+            }
         }
     }
 
     private suspend fun listenForMessages() {
         val buffer = ByteArray(65535)
-        println("[Android-$peerId] Listening for messages on port $DISCOVERY_PORT")
-
-        while (isRunning && discoverySocket != null) {
+        while (isRunning && udpSocket != null) {
             try {
                 val packet = DatagramPacket(buffer, buffer.size)
-                withContext(Dispatchers.IO) {
-                    discoverySocket?.receive(packet)
-                }
-
+                withContext(Dispatchers.IO) { udpSocket?.receive(packet) }
                 val data = packet.data.copyOf(packet.length)
-                // Message format: peerId:payload
                 val message = String(data, Charsets.UTF_8)
                 val separatorIndex = message.indexOf(':')
                 if (separatorIndex > 0) {
                     val fromPeerId = message.substring(0, separatorIndex)
-                    if (fromPeerId != peerId) {
-                        val payload = data.copyOfRange(separatorIndex + 1, data.size)
-                        incomingChannel.send(PeerMessage.Data(fromPeerId, payload))
+                    if (fromPeerId == peerId) continue
+                    val payload = message.substring(separatorIndex + 1)
+                    when {
+                        payload.startsWith(HANDSHAKE_HELLO) -> handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "")
+                        payload.startsWith(HANDSHAKE_ACK) -> handleAckReceived(fromPeerId)
+                        else -> {
+                            val state = peerStates[fromPeerId]
+                            if (state?.isJoined == true) {
+                                incomingChannel.send(PeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
+                            }
+                        }
                     }
                 }
+            } catch (e: SocketTimeoutException) {
             } catch (e: Exception) {
-                if (isRunning) {
-                    // Socket closed or other error
-                }
+                if (isRunning) println("[PeerNet-$peerId] Receive error: ${e.message}")
             }
         }
+    }
+
+    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String) {
+        val helloData = payload.removePrefix(HANDSHAKE_HELLO)
+        val parts = helloData.split("|")
+        val pName = parts.getOrNull(0) ?: "Unknown"
+        var pAddr = parts.getOrNull(2) ?: fromAddress
+        val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+        
+        // Emulator logic: 
+        // 1. If we receive a HELLO with 10.0.2.15, it's from another emulator or ourselves (translated). 
+        //    Use fromAddress which is the correct address to respond to.
+        if (pAddr == "10.0.2.15") {
+            pAddr = fromAddress
+        }
+        
+        // 2. If we are an emulator (our IP is 10.0.2.15) and the peer is NOT an emulator,
+        //    we should try to reach the host at 10.0.2.2.
+        if (localAddress == "10.0.2.15" && !pAddr.startsWith("10.0.2.") && pAddr != "127.0.0.1") {
+            println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Adding 10.0.2.2 as alternative.")
+            // We can't easily add an alternative, but we can try to send HELLO to 10.0.2.2 too
+            scope?.launch {
+                delay(500)
+                sendUdp("10.0.2.2", pPort, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
+            }
+        }
+
+        val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
+        val state = peerStates.compute(fromPeerId) { _, existing ->
+            if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
+            else { existing.weSeeThemViaDiscovery = true; existing }
+        }!!
+        if (!state.weAckedThem) {
+            sendHandshakeAck(peerInfo)
+            state.weAckedThem = true
+        }
+        checkAndEmitJoined(state)
+    }
+
+    private fun handleAckReceived(fromPeerId: String) {
+        val state = peerStates[fromPeerId] ?: return
+        state.theyAckedUs = true
+        checkAndEmitJoined(state)
+    }
+
+    private fun checkAndEmitJoined(state: PeerState) {
+        if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
+            state.isJoined = true
+            println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
+            scope?.launch { incomingChannel.send(PeerMessage.Event.Connected(state.info)) }
+        }
+    }
+
+    private fun sendHandshakeHello(peer: PeerInfo) {
+        val payload = "$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort"
+        sendUdp(peer.address, peer.port, "$peerId:$payload")
+    }
+
+    private fun sendHandshakeAck(peer: PeerInfo) {
+        val payload = "$HANDSHAKE_ACK$peerId"
+        sendUdp(peer.address, peer.port, "$peerId:$payload")
+    }
+
+    private fun sendUdp(address: String, port: Int, message: String) {
+        try {
+            val data = message.toByteArray(Charsets.UTF_8)
+            val packet = DatagramPacket(data, data.size, InetAddress.getByName(address), port)
+            DatagramSocket().use { it.send(packet) }
+        } catch (e: Exception) {}
     }
 
     private suspend fun processOutgoingCommands() {
         for (command in outgoingChannel) {
             when (command) {
                 is PeerCommand.SendTo -> {
-                    val peer = discoveredPeers[command.peerId]
-                    if (peer != null) {
-                        sendToPeer(peer.address, peer.port, command.payload)
+                    peerStates[command.peerId]?.takeIf { it.isJoined }?.let {
+                        sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                     }
                 }
                 is PeerCommand.Broadcast -> {
-                    discoveredPeers.values.forEach { peer ->
-                        sendToPeer(peer.address, peer.port, command.payload)
+                    peerStates.values.filter { it.isJoined }.forEach {
+                        sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                     }
                 }
-            }
-        }
-    }
-
-    private suspend fun sendToPeer(address: String, port: Int, payload: ByteArray) {
-        withContext(Dispatchers.IO) {
-            try {
-                val message = "$peerId:".toByteArray(Charsets.UTF_8) + payload
-                val packet = DatagramPacket(
-                    message,
-                    message.size,
-                    InetAddress.getByName(address),
-                    port
-                )
-                DatagramSocket().use { socket ->
-                    socket.send(packet)
-                }
-            } catch (e: Exception) {
-                println("[Android-$peerId] Send error: ${e.message}")
             }
         }
     }
@@ -263,30 +335,29 @@ private class AndroidPeerTransport(
         try {
             serviceInfo?.let { jmdns?.unregisterService(it) }
             jmdns?.close()
-        } catch (e: Exception) {
-            println("[Android-$peerId] Error closing mDNS: ${e.message}")
-        }
-        discoverySocket?.close()
+        } catch (e: Exception) {}
+        udpSocket?.close()
     }
 
     private fun getLocalIpAddress(): String {
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
+            var fallback: String? = null
             while (interfaces.hasMoreElements()) {
-                val networkInterface = interfaces.nextElement()
-                if (networkInterface.isLoopback || !networkInterface.isUp) continue
-
-                val addresses = networkInterface.inetAddresses
-                while (addresses.hasMoreElements()) {
-                    val address = addresses.nextElement()
-                    if (address is Inet4Address && !address.isLoopbackAddress) {
-                        return address.hostAddress ?: "127.0.0.1"
+                val ni = interfaces.nextElement()
+                if (ni.isLoopback || !ni.isUp) continue
+                val addrs = ni.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                        val ip = addr.hostAddress ?: continue
+                        if (ip == "10.0.2.15") return ip
+                        fallback = ip
                     }
                 }
             }
-        } catch (e: Exception) {
-            println("[Android] Error getting local IP: ${e.message}")
-        }
+            return fallback ?: "127.0.0.1"
+        } catch (e: Exception) {}
         return "127.0.0.1"
     }
 }

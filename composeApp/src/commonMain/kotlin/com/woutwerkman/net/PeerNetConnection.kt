@@ -16,6 +16,24 @@ data class PeerInfo(
     val port: Int
 )
 
+data class PeerMessageV2(
+    /**
+     * When receiving, this represents the peer that sent the message.
+     * When sending, this represents the peer that the message is intended for, or null if it's a broadcast.
+     */
+    val peerId: String?,
+    val event: Event,
+) {
+    sealed class Event {
+        @Serializable
+        data object Joined : Event()
+        @Serializable
+        data object Left : Event()
+        @Serializable
+        data class DataShared(val bas64Payload: String) : Event()
+    }
+}
+
 /**
  * Messages that can be sent/received over the peer network.
  */
@@ -34,13 +52,13 @@ sealed class PeerMessage {
          * peers that are fully connected.
          */
         @Serializable
-        data class Joined(val peer: PeerInfo) : Event()
+        data class Connected(val peer: PeerInfo) : Event()
 
         /**
          * A previously connected peer has left the network.
          */
         @Serializable
-        data class Left(val peerId: String) : Event()
+        data class Disconnected(val peerId: String) : Event()
     }
 
     /**
@@ -111,13 +129,8 @@ sealed class PeerCommand {
     }
 }
 
-/**
- * A connection to the peer network, providing channels for sending and receiving messages.
- */
-class PeerNetConnection(
-    val incoming: ReceiveChannel<PeerMessage>,
-    val outgoing: SendChannel<PeerCommand>
-)
+/** A connection to the peer network */
+class PeerNetConnection(val incoming: ReceiveChannel<PeerMessage>, val outgoing: SendChannel<PeerCommand>)
 
 /**
  * Configuration for the peer network connection.
@@ -125,22 +138,21 @@ class PeerNetConnection(
 data class PeerNetConfig(
     val serviceName: String = "chippy",
     val displayName: String = "Peer",
-    val discoveryTimeoutMs: Long = 30_000
 )
 
 /**
  * Establishes a connection to the peer network for discovering and communicating with other peers on the LAN.
+ * All messages sent into the [peer connection's outgoing][PeerNetConnection.outgoing] channel are sent to through the network.
+ *
+ * The following two types of events are not explicitly sent by other peers or by you.
+ * Instead, they are sent from within this function:
+ * - [PeerMessage.Event.Connected]: A peer is fully connected (bidirectional connectivity verified)
+ * - [PeerMessage.Event.Disconnected]: A peer has disconnected
  *
  * The connection handles all the complexity of peer discovery internally:
- * - mDNS/Bonjour service advertisement and discovery
+ * - Service advertisement and discovery
  * - Bidirectional handshake verification (ensuring both peers can see each other)
  * - Keep-alive and timeout management
- *
- * Consumers receive simple events:
- * - [PeerMessage.Event.Joined]: A peer is fully connected (bidirectional connectivity verified)
- * - [PeerMessage.Event.Left]: A peer has disconnected
- * - [PeerMessage.Received]: Application data from a peer
- *
  * Internal protocol messages used for handshaking are hidden from consumers.
  */
 suspend fun <T> withPeerNetConnection(

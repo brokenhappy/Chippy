@@ -230,8 +230,13 @@ private class IosPeerNetConnectionImpl(
         val helloData = payload.removePrefix(HANDSHAKE_HELLO)
         val parts = helloData.split("|")
         val pName = parts.getOrNull(0) ?: "Unknown"
-        val pAddr = parts.getOrNull(2) ?: fromAddress
+        var pAddr = parts.getOrNull(2) ?: fromAddress
         val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+        // Map emulator internal IP to sender IP
+        if (pAddr == "10.0.2.15") {
+            pAddr = fromAddress
+        }
 
         val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
 
@@ -261,7 +266,7 @@ private class IosPeerNetConnectionImpl(
             state.isJoined = true
             NSLog("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
             scope.launch {
-                incoming.send(PeerMessage.Event.Joined(state.info))
+                incoming.send(PeerMessage.Event.Connected(state.info))
             }
         }
     }

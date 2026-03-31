@@ -91,11 +91,20 @@ private class JvmPeerTransport(
                 localAddress = getLocalIpAddress()
                 println("[PeerNet-$peerId] Local IP: $localAddress")
 
-                // Start UDP socket for messaging - use port 0 to let OS assign
-                udpSocket = DatagramSocket(0).apply {
-                    reuseAddress = true
-                    broadcast = true
-                    soTimeout = 100 // 100ms timeout for receive
+                // Start UDP socket for messaging - try MESSAGE_PORT first, fallback to random
+                udpSocket = try {
+                    DatagramSocket(MESSAGE_PORT).apply {
+                        reuseAddress = true
+                        broadcast = true
+                        soTimeout = 100
+                    }
+                } catch (e: Exception) {
+                    println("[PeerNet-$peerId] MESSAGE_PORT $MESSAGE_PORT busy, using random port")
+                    DatagramSocket(0).apply {
+                        reuseAddress = true
+                        broadcast = true
+                        soTimeout = 100
+                    }
                 }
                 localPort = udpSocket!!.localPort
                 println("[PeerNet-$peerId] Bound to port $localPort")
@@ -212,7 +221,7 @@ private class JvmPeerTransport(
             val state = peerStates.remove(pId)
             if (state?.isJoined == true) {
                 scope?.launch {
-                    incomingChannel.send(PeerMessage.Event.Left(pId))
+                    incomingChannel.send(PeerMessage.Event.Disconnected(pId))
                 }
             }
         }
@@ -302,8 +311,19 @@ private class JvmPeerTransport(
         val helloData = payload.removePrefix(HANDSHAKE_HELLO)
         val parts = helloData.split("|")
         val pName = parts.getOrNull(0) ?: "Unknown"
-        val pAddr = parts.getOrNull(2) ?: fromAddress
+        var pAddr = parts.getOrNull(2) ?: fromAddress
         val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+        // If peer is an Android emulator (sending 10.0.2.15), and we are the host, 
+        // we must respond to 10.0.2.2 if we want to reach it back via ADB reverse,
+        // OR simply use the packet's source address if it's already translated by the emulator.
+        // On the host, the emulator appears as 127.0.0.1 if port-forwarded, or 10.0.2.2 doesn't exist.
+        // Actually, if we are on host and emulator sends 10.0.2.15, we can't reach it back easily.
+        // But if the packet arrived, fromAddress should be correct for responding.
+        if (pAddr == "10.0.2.15") {
+            println("[PeerNet-$peerId] Mapping emulator 10.0.2.15 to source address $fromAddress")
+            pAddr = fromAddress
+        }
 
         val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
 
@@ -346,7 +366,7 @@ private class JvmPeerTransport(
             state.isJoined = true
             println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
             scope?.launch {
-                incomingChannel.send(PeerMessage.Event.Joined(state.info))
+                incomingChannel.send(PeerMessage.Event.Connected(state.info))
             }
         }
     }

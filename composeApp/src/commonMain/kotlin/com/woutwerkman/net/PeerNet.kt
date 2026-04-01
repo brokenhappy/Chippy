@@ -393,7 +393,7 @@ private fun applyPendingBefore(
 ): PeerNetState {
     var state = initialState
     while (pending.isNotEmpty() && pending.first().time <= before) {
-        val next = pending.removeFirst()
+        val next = pending.removeAt(0)
         state = applyWithTimedEvent(state, next, pending)
     }
     return state

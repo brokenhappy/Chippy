@@ -6,6 +6,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,7 +50,7 @@ fun SettingsDialog(
                 OutlinedTextField(
                     value = nameInput,
                     onValueChange = { nameInput = it },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().testTag("name-field"),
                     singleLine = true,
                     placeholder = { Text("Enter your name") }
                 )
@@ -74,7 +75,8 @@ fun SettingsDialog(
                                 onDismiss()
                             }
                         },
-                        enabled = nameInput.isNotBlank() && nameInput != currentName
+                        enabled = nameInput.isNotBlank() && nameInput != currentName,
+                        modifier = Modifier.testTag("save-button")
                     ) {
                         Text("Save")
                     }

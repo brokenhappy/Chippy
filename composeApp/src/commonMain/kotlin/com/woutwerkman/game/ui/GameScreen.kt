@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -90,6 +91,7 @@ fun GameScreen(
             ) {
                 items(players, key = { it.key }) { (playerId, value) ->
                     PlayerButton(
+                        playerId = playerId,
                         playerName = playerNames[playerId] ?: "Unknown",
                         value = value,
                         isLocalPlayer = playerId == localPlayerId,
@@ -158,6 +160,7 @@ fun GameScreen(
 
 @Composable
 private fun PlayerButton(
+    playerId: String,
     playerName: String,
     value: Int,
     isLocalPlayer: Boolean,
@@ -196,7 +199,8 @@ private fun PlayerButton(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .scale(if (isZero) glowScale else 1f),
+            .scale(if (isZero) glowScale else 1f)
+            .testTag("player-button-$playerId"),
         enabled = enabled,
         shape = RoundedCornerShape(16.dp),
         colors = ButtonDefaults.buttonColors(

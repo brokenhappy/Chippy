@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -86,7 +87,7 @@ fun VotingScreen(
                 isSelected = localVote == VoteChoice.PLAY_AGAIN,
                 voteCount = playAgainVotes,
                 enabled = !hasVoted,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).testTag("vote-play-again"),
                 onClick = { onVote(VoteChoice.PLAY_AGAIN) }
             )
 
@@ -96,7 +97,7 @@ fun VotingScreen(
                 isSelected = localVote == VoteChoice.END_LOBBY,
                 voteCount = endLobbyVotes,
                 enabled = !hasVoted,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).testTag("vote-end-lobby"),
                 onClick = { onVote(VoteChoice.END_LOBBY) }
             )
         }

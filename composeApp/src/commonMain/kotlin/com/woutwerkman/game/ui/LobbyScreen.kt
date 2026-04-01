@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,7 +60,7 @@ fun LobbyScreen(
                 )
             }
 
-            TextButton(onClick = onLeaveLobby) {
+            TextButton(onClick = onLeaveLobby, modifier = Modifier.testTag("leave-button")) {
                 Text(
                     text = "Leave",
                     color = MaterialTheme.colorScheme.error
@@ -138,7 +139,8 @@ fun LobbyScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp)
-                .scale(buttonScale),
+                .scale(buttonScale)
+                .testTag("ready-button"),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = buttonColor),
             enabled = countdownValue == null

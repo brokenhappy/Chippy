@@ -38,184 +38,193 @@ fun App() {
             }
         }
 
-        // Combine into WholeState
-        val wholeState by combine(publicState, internalState) { pub, int ->
-            WholeState(
-                localId = connectionRef.value?.localId ?: "",
-                publicState = pub,
-                internalState = int,
-            )
-        }.collectAsState(WholeState(internalState = internalState.value))
+        AppContent(connectionRef.value, publicState, internalState)
+    }
+}
 
-        val conn = connectionRef.value
-        val localId = wholeState.localId
-        val pub = wholeState.publicState
-        val int = wholeState.internalState
+@Composable
+fun AppContent(
+    connection: PeerNetConnection?,
+    publicState: MutableStateFlow<PeerNetState>,
+    internalState: MutableStateFlow<InternalState>,
+) {
+    // Combine into WholeState
+    val wholeState by combine(publicState, internalState) { pub, int ->
+        WholeState(
+            localId = connection?.localId ?: "",
+            publicState = pub,
+            internalState = int,
+        )
+    }.collectAsState(WholeState(internalState = internalState.value))
 
-        // Derive "my lobby" — the lobby the local player is in (if any)
-        val myLobby = pub.lobbies.values.firstOrNull { localId in it.players }
-        val myLobbyId = myLobby?.lobbyId
+    val conn = connection
+    val localId = wholeState.localId
+    val pub = wholeState.publicState
+    val int = wholeState.internalState
 
-        // --- Side effects ---
-        // Game logic (start, win, votes, countdown) is handled by deterministic cascades
-        // and timed events in PeerNetState.after(). App.kt only manages screen navigation.
+    // Derive "my lobby" — the lobby the local player is in (if any)
+    val myLobby = pub.lobbies.values.firstOrNull { localId in it.players }
+    val myLobbyId = myLobby?.lobbyId
 
-        val gamePhase = myLobby?.gamePhase ?: GamePhase.WAITING
-        val countdownValue = myLobby?.countdownValue
+    // --- Side effects ---
+    // Game logic (start, win, votes, countdown) is handled by deterministic cascades
+    // and timed events in PeerNetState.after(). App.kt only manages screen navigation.
 
-        // Screen navigation based on game phase
-        LaunchedEffect(gamePhase, myLobbyId) {
-            when (gamePhase) {
-                GamePhase.COUNTDOWN -> internalState.update { it.copy(screen = Screen.LOBBY) }
-                GamePhase.PLAYING -> internalState.update { it.copy(screen = Screen.GAME) }
-                GamePhase.VOTING -> internalState.update { it.copy(screen = Screen.VOTING) }
-                GamePhase.ENDED -> {
-                    if (myLobbyId != null) conn?.submitEvent(PeerEvent.LeftLobby(myLobbyId, localId))
-                    internalState.update { it.copy(screen = Screen.HOME) }
+    val gamePhase = myLobby?.gamePhase ?: GamePhase.WAITING
+    val countdownValue = myLobby?.countdownValue
+
+    // Screen navigation based on game phase
+    LaunchedEffect(gamePhase, myLobbyId) {
+        when (gamePhase) {
+            GamePhase.COUNTDOWN -> internalState.update { it.copy(screen = Screen.LOBBY) }
+            GamePhase.PLAYING -> internalState.update { it.copy(screen = Screen.GAME) }
+            GamePhase.VOTING -> internalState.update { it.copy(screen = Screen.VOTING) }
+            GamePhase.ENDED -> {
+                if (myLobbyId != null) conn?.submitEvent(PeerEvent.LeftLobby(myLobbyId, localId))
+                internalState.update { it.copy(screen = Screen.HOME) }
+            }
+            GamePhase.WAITING -> {
+                // After play-again vote, return to lobby
+                if (int.screen == Screen.VOTING || int.screen == Screen.GAME) {
+                    internalState.update { it.copy(screen = Screen.LOBBY) }
                 }
-                GamePhase.WAITING -> {
-                    // After play-again vote, return to lobby
-                    if (int.screen == Screen.VOTING || int.screen == Screen.GAME) {
-                        internalState.update { it.copy(screen = Screen.LOBBY) }
+            }
+            else -> {}
+        }
+    }
+
+    // --- Render ---
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .safeContentPadding()
+    ) {
+        val coroutineScope = rememberCoroutineScope()
+
+        AnimatedContent(
+            targetState = int.screen,
+            transitionSpec = {
+                fadeIn() + slideInHorizontally { it } togetherWith
+                        fadeOut() + slideOutHorizontally { -it }
+            },
+            label = "screenTransition"
+        ) { screen ->
+            when (screen) {
+                Screen.HOME -> {
+                    val peers = pub.discoveredPeers.values
+                        .filter { it.id != localId }
+                        .toList()
+
+                    // Show lobby card only if our lobby has more than just us
+                    val lobbyPlayers = myLobby?.players?.entries?.map { (id, lp) ->
+                        PeerInfo(id = id, name = lp.name, address = "", port = 0)
+                    } ?: emptyList()
+                    val showLobby = lobbyPlayers.size > 1
+
+                    HomeScreen(
+                        playerName = int.playerName,
+                        peers = peers,
+                        lobbyPlayers = if (showLobby) lobbyPlayers else emptyList(),
+                        onSettingsClick = {
+                            internalState.update { it.copy(showSettings = !it.showSettings) }
+                        },
+                        onJoinPeer = { peerId ->
+                            coroutineScope.launch {
+                                // Find the lobby the target peer is in
+                                val targetLobby = pub.lobbies.values.firstOrNull { peerId in it.players }
+                                if (targetLobby != null) {
+                                    conn?.submitEvent(PeerEvent.JoinedLobby(
+                                        lobbyId = targetLobby.lobbyId,
+                                        playerId = localId,
+                                    ))
+                                    internalState.update { it.copy(screen = Screen.LOBBY) }
+                                }
+                            }
+                        },
+                        onEnterLobby = {
+                            internalState.update { it.copy(screen = Screen.LOBBY) }
+                        }
+                    )
+                }
+
+                Screen.LOBBY -> {
+                    val lobby = myLobby
+                    if (lobby != null) {
+                        LobbyScreen(
+                            lobby = lobby,
+                            localPlayerId = localId,
+                            countdownValue = countdownValue,
+                            onToggleReady = {
+                                coroutineScope.launch {
+                                    val currentReady = lobby.players[localId]?.isReady ?: false
+                                    conn?.submitEvent(PeerEvent.ReadyChanged(lobby.lobbyId, localId, !currentReady))
+                                }
+                            },
+                            onLeaveLobby = {
+                                coroutineScope.launch {
+                                    conn?.submitEvent(PeerEvent.LeftLobby(lobby.lobbyId, localId))
+                                    internalState.update { it.copy(screen = Screen.HOME) }
+                                }
+                            }
+                        )
                     }
                 }
-                else -> {}
+
+                Screen.GAME -> {
+                    val lobby = myLobby
+                    GameScreen(
+                        playerValues = lobby?.playerValues ?: emptyMap(),
+                        playerNames = lobby?.players?.mapValues { it.value.name } ?: emptyMap(),
+                        gamePhase = lobby?.gamePhase ?: GamePhase.WAITING,
+                        localPlayerId = localId,
+                        countdownValue = countdownValue,
+                        onButtonPress = { targetPlayerId ->
+                            coroutineScope.launch {
+                                if (lobby != null && lobby.gamePhase == GamePhase.PLAYING) {
+                                    val delta = if (targetPlayerId == localId) -2 else 1
+                                    conn?.submitEvent(PeerEvent.ButtonPress(
+                                        lobbyId = lobby.lobbyId,
+                                        sourceId = localId,
+                                        targetId = targetPlayerId,
+                                        delta = delta,
+                                    ))
+                                }
+                            }
+                        }
+                    )
+                }
+
+                Screen.VOTING -> {
+                    val lobby = myLobby
+                    if (lobby != null) {
+                        VotingScreen(
+                            lobbyPlayers = lobby.players,
+                            votes = lobby.votes,
+                            localPlayerId = localId,
+                            onVote = { choice ->
+                                coroutineScope.launch {
+                                    conn?.submitEvent(PeerEvent.VoteCast(lobby.lobbyId, localId, choice))
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
 
-        // --- Render ---
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .safeContentPadding()
-        ) {
-            val coroutineScope = rememberCoroutineScope()
-
-            AnimatedContent(
-                targetState = int.screen,
-                transitionSpec = {
-                    fadeIn() + slideInHorizontally { it } togetherWith
-                            fadeOut() + slideOutHorizontally { -it }
+        // Settings dialog
+        if (int.showSettings) {
+            SettingsDialog(
+                currentName = int.playerName,
+                onNameChange = { newName ->
+                    internalState.update { it.copy(playerName = newName, showSettings = false) }
                 },
-                label = "screenTransition"
-            ) { screen ->
-                when (screen) {
-                    Screen.HOME -> {
-                        val peers = pub.discoveredPeers.values
-                            .filter { it.id != localId }
-                            .toList()
-
-                        // Show lobby card only if our lobby has more than just us
-                        val lobbyPlayers = myLobby?.players?.entries?.map { (id, lp) ->
-                            PeerInfo(id = id, name = lp.name, address = "", port = 0)
-                        } ?: emptyList()
-                        val showLobby = lobbyPlayers.size > 1
-
-                        HomeScreen(
-                            playerName = int.playerName,
-                            peers = peers,
-                            lobbyPlayers = if (showLobby) lobbyPlayers else emptyList(),
-                            onSettingsClick = {
-                                internalState.update { it.copy(showSettings = !it.showSettings) }
-                            },
-                            onJoinPeer = { peerId ->
-                                coroutineScope.launch {
-                                    // Find the lobby the target peer is in
-                                    val targetLobby = pub.lobbies.values.firstOrNull { peerId in it.players }
-                                    if (targetLobby != null) {
-                                        conn?.submitEvent(PeerEvent.JoinedLobby(
-                                            lobbyId = targetLobby.lobbyId,
-                                            playerId = localId,
-                                        ))
-                                        internalState.update { it.copy(screen = Screen.LOBBY) }
-                                    }
-                                }
-                            },
-                            onEnterLobby = {
-                                internalState.update { it.copy(screen = Screen.LOBBY) }
-                            }
-                        )
-                    }
-
-                    Screen.LOBBY -> {
-                        val lobby = myLobby
-                        if (lobby != null) {
-                            LobbyScreen(
-                                lobby = lobby,
-                                localPlayerId = localId,
-                                countdownValue = countdownValue,
-                                onToggleReady = {
-                                    coroutineScope.launch {
-                                        val currentReady = lobby.players[localId]?.isReady ?: false
-                                        conn?.submitEvent(PeerEvent.ReadyChanged(lobby.lobbyId, localId, !currentReady))
-                                    }
-                                },
-                                onLeaveLobby = {
-                                    coroutineScope.launch {
-                                        conn?.submitEvent(PeerEvent.LeftLobby(lobby.lobbyId, localId))
-                                        internalState.update { it.copy(screen = Screen.HOME) }
-                                    }
-                                }
-                            )
-                        }
-                    }
-
-                    Screen.GAME -> {
-                        val lobby = myLobby
-                        GameScreen(
-                            playerValues = lobby?.playerValues ?: emptyMap(),
-                            playerNames = lobby?.players?.mapValues { it.value.name } ?: emptyMap(),
-                            gamePhase = lobby?.gamePhase ?: GamePhase.WAITING,
-                            localPlayerId = localId,
-                            countdownValue = countdownValue,
-                            onButtonPress = { targetPlayerId ->
-                                coroutineScope.launch {
-                                    if (lobby != null && lobby.gamePhase == GamePhase.PLAYING) {
-                                        val delta = if (targetPlayerId == localId) -2 else 1
-                                        conn?.submitEvent(PeerEvent.ButtonPress(
-                                            lobbyId = lobby.lobbyId,
-                                            sourceId = localId,
-                                            targetId = targetPlayerId,
-                                            delta = delta,
-                                        ))
-                                    }
-                                }
-                            }
-                        )
-                    }
-
-                    Screen.VOTING -> {
-                        val lobby = myLobby
-                        if (lobby != null) {
-                            VotingScreen(
-                                lobbyPlayers = lobby.players,
-                                votes = lobby.votes,
-                                localPlayerId = localId,
-                                onVote = { choice ->
-                                    coroutineScope.launch {
-                                        conn?.submitEvent(PeerEvent.VoteCast(lobby.lobbyId, localId, choice))
-                                    }
-                                }
-                            )
-                        }
-                    }
+                onDismiss = {
+                    internalState.update { it.copy(showSettings = false) }
                 }
-            }
-
-            // Settings dialog
-            if (int.showSettings) {
-                SettingsDialog(
-                    currentName = int.playerName,
-                    onNameChange = { newName ->
-                        internalState.update { it.copy(playerName = newName, showSettings = false) }
-                    },
-                    onDismiss = {
-                        internalState.update { it.copy(showSettings = false) }
-                    }
-                )
-            }
+            )
         }
     }
 }

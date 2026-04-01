@@ -13,6 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +59,7 @@ fun HomeScreen(
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .testTag("settings-button")
             ) {
                 Text("⚙", fontSize = 24.sp)
             }
@@ -171,6 +173,7 @@ private fun PeerCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("join-${peer.id}")
             .clickable(onClick = onJoin),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -229,6 +232,7 @@ private fun ConnectedGroupCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("enter-lobby")
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer

@@ -16,30 +16,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.woutwerkman.net.Invite
 import com.woutwerkman.net.PeerInfo
-
-/**
- * Represents a peer with their invite status for unified display
- */
-private data class PeerDisplayInfo(
-    val peer: PeerInfo,
-    val hasIncomingInvite: Boolean,
-    val hasSentInvite: Boolean,
-    val incomingInvite: Invite?
-)
 
 @Composable
 fun HomeScreen(
     playerName: String,
     peers: List<PeerInfo>,
     lobbyPlayers: List<PeerInfo>,
-    incomingInvites: List<Invite>,
-    sentInviteIds: Set<String>,
     onSettingsClick: () -> Unit,
-    onInvitePeer: (String) -> Unit,
-    onAcceptInvite: (Invite) -> Unit,
-    onRejectInvite: (Invite) -> Unit,
+    onJoinPeer: (String) -> Unit,
     onEnterLobby: () -> Unit
 ) {
     Column(
@@ -107,39 +92,11 @@ fun HomeScreen(
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Build unified peer list with invite status
+        // Filter out players already in our lobby
         val lobbyPlayerIds = lobbyPlayers.map { it.id }.toSet()
-        val incomingInviteMap = incomingInvites.associateBy { it.fromId }
+        val availablePeers = peers.filter { it.id !in lobbyPlayerIds }
 
-        val peerDisplayList = peers
-            .filter { it.id !in lobbyPlayerIds }
-            .map { peer ->
-                PeerDisplayInfo(
-                    peer = peer,
-                    hasIncomingInvite = peer.id in incomingInviteMap,
-                    hasSentInvite = peer.id in sentInviteIds,
-                    incomingInvite = incomingInviteMap[peer.id]
-                )
-            }
-            .sortedWith(compareByDescending<PeerDisplayInfo> { it.hasIncomingInvite }
-            .thenByDescending { it.hasSentInvite })
-
-        // Add peers who sent invites but aren't in discovered peers list yet
-        val discoveredPeerIds = peers.map { it.id }.toSet()
-        val additionalInvites = incomingInvites
-            .filter { it.fromId !in discoveredPeerIds && it.fromId !in lobbyPlayerIds }
-            .map { invite ->
-                PeerDisplayInfo(
-                    peer = PeerInfo(id = invite.fromId, name = "Unknown", address = "", port = 0),
-                    hasIncomingInvite = true,
-                    hasSentInvite = false,
-                    incomingInvite = invite
-                )
-            }
-
-        val allPeers = additionalInvites + peerDisplayList
-
-        if (allPeers.isEmpty() && lobbyPlayers.isEmpty()) {
+        if (availablePeers.isEmpty() && lobbyPlayers.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -171,7 +128,7 @@ fun HomeScreen(
                     }
                 }
             }
-        } else if (allPeers.isEmpty()) {
+        } else if (availablePeers.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -195,12 +152,10 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(allPeers, key = { it.peer.id }) { peerInfo ->
+                items(availablePeers, key = { it.id }) { peer ->
                     PeerCard(
-                        peerInfo = peerInfo,
-                        onInvite = { onInvitePeer(peerInfo.peer.id) },
-                        onAccept = { peerInfo.incomingInvite?.let { onAcceptInvite(it) } },
-                        onReject = { peerInfo.incomingInvite?.let { onRejectInvite(it) } }
+                        peer = peer,
+                        onJoin = { onJoinPeer(peer.id) }
                     )
                 }
             }
@@ -210,40 +165,14 @@ fun HomeScreen(
 
 @Composable
 private fun PeerCard(
-    peerInfo: PeerDisplayInfo,
-    onInvite: () -> Unit,
-    onAccept: () -> Unit,
-    onReject: () -> Unit
+    peer: PeerInfo,
+    onJoin: () -> Unit
 ) {
-    val containerColor = when {
-        peerInfo.hasIncomingInvite -> MaterialTheme.colorScheme.tertiaryContainer
-        peerInfo.hasSentInvite -> MaterialTheme.colorScheme.surfaceVariant
-        else -> MaterialTheme.colorScheme.surface
-    }
-
-    val avatarColor = when {
-        peerInfo.hasIncomingInvite -> MaterialTheme.colorScheme.tertiary
-        peerInfo.hasSentInvite -> MaterialTheme.colorScheme.secondaryContainer
-        else -> MaterialTheme.colorScheme.primaryContainer
-    }
-
-    val avatarTextColor = when {
-        peerInfo.hasIncomingInvite -> MaterialTheme.colorScheme.onTertiary
-        peerInfo.hasSentInvite -> MaterialTheme.colorScheme.onSecondaryContainer
-        else -> MaterialTheme.colorScheme.onPrimaryContainer
-    }
-
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (!peerInfo.hasIncomingInvite && !peerInfo.hasSentInvite) {
-                    Modifier.clickable(onClick = onInvite)
-                } else {
-                    Modifier
-                }
-            ),
-        colors = CardDefaults.cardColors(containerColor = containerColor),
+            .clickable(onClick = onJoin),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
@@ -256,14 +185,14 @@ private fun PeerCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(avatarColor),
+                    .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = peerInfo.peer.name.first().uppercase(),
+                    text = peer.name.first().uppercase(),
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = avatarTextColor
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
             }
 
@@ -271,61 +200,23 @@ private fun PeerCard(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = peerInfo.peer.name,
+                    text = peer.name,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = when {
-                        peerInfo.hasIncomingInvite -> "Wants to play with you"
-                        peerInfo.hasSentInvite -> "Invite sent - waiting..."
-                        else -> "Tap to invite"
-                    },
+                    text = "Tap to join",
                     fontSize = 12.sp,
-                    color = when {
-                        peerInfo.hasIncomingInvite -> MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
-                        peerInfo.hasSentInvite -> MaterialTheme.colorScheme.primary
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    }
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            when {
-                peerInfo.hasIncomingInvite -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = onReject,
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Text("Decline", fontSize = 12.sp)
-                        }
-                        Button(
-                            onClick = onAccept,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Text("Accept", fontSize = 12.sp)
-                        }
-                    }
-                }
-                peerInfo.hasSentInvite -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                else -> {
-                    Text(
-                        text = "+",
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            Text(
+                text = "+",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.woutwerkman.net
 
+import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -112,7 +113,7 @@ private class IosPeerNetConnectionImpl(
                     NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
                 }
 
-                delay(50)
+                delay(50.milliseconds)
 
                 peerStates.values.toList().forEach { state ->
                     if (state.weSeeThemViaDiscovery && !state.isJoined) {
@@ -236,7 +237,7 @@ private class IosPeerNetConnectionImpl(
                     }
                 }
             }
-            delay(10)
+            delay(10.milliseconds)
         }
     }
 

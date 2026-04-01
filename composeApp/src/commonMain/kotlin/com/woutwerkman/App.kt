@@ -10,11 +10,11 @@ import com.woutwerkman.game.model.*
 import com.woutwerkman.game.ui.*
 import com.woutwerkman.net.*
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
 
 @Composable
 fun App() {
@@ -52,81 +52,35 @@ fun App() {
         val pub = wholeState.publicState
         val int = wholeState.internalState
 
+        // Derive "my lobby" — the lobby the local player is in (if any)
+        val myLobby = pub.lobbies.values.firstOrNull { localId in it.players }
+        val myLobbyId = myLobby?.lobbyId
+
         // --- Side effects ---
+        // Game logic (start, win, votes, countdown) is handled by deterministic cascades
+        // and timed events in PeerNetState.after(). App.kt only manages screen navigation.
 
-        // Countdown timer (auto-cancels when gamePhase changes)
-        val gamePhase = pub.gamePhase
-        LaunchedEffect(gamePhase) {
-            if (gamePhase == GamePhase.COUNTDOWN || gamePhase == GamePhase.WIN_COUNTDOWN) {
-                for (i in 3 downTo 1) {
-                    internalState.update { it.copy(countdownValue = i) }
-                    delay(1000)
-                }
-                internalState.update { it.copy(countdownValue = null) }
+        val gamePhase = myLobby?.gamePhase ?: GamePhase.WAITING
+        val countdownValue = myLobby?.countdownValue
 
-                // Host initiates phase transition after countdown
-                val isHost = pub.lobby?.hostId == localId
-                if (isHost && conn != null) {
-                    when (gamePhase) {
-                        GamePhase.COUNTDOWN -> conn.submitEvent(PeerEvent.PhaseChanged(GamePhase.PLAYING))
-                        GamePhase.WIN_COUNTDOWN -> conn.submitEvent(PeerEvent.PhaseChanged(GamePhase.VOTING))
-                        else -> {}
-                    }
-                }
-            } else {
-                internalState.update { it.copy(countdownValue = null) }
-            }
-        }
-
-        // Navigate to game screen when game starts
-        LaunchedEffect(gamePhase) {
+        // Screen navigation based on game phase
+        LaunchedEffect(gamePhase, myLobbyId) {
             when (gamePhase) {
+                GamePhase.COUNTDOWN -> internalState.update { it.copy(screen = Screen.LOBBY) }
                 GamePhase.PLAYING -> internalState.update { it.copy(screen = Screen.GAME) }
                 GamePhase.VOTING -> internalState.update { it.copy(screen = Screen.VOTING) }
                 GamePhase.ENDED -> {
-                    // Leave lobby and go home
-                    conn?.submitEvent(PeerEvent.LeftLobby(localId))
+                    if (myLobbyId != null) conn?.submitEvent(PeerEvent.LeftLobby(myLobbyId, localId))
                     internalState.update { it.copy(screen = Screen.HOME) }
                 }
-                else -> {}
-            }
-        }
-
-        // Win detection: host checks if all values are zero
-        val allZeros = pub.playerValues.isNotEmpty() && pub.playerValues.values.all { it == 0 }
-        LaunchedEffect(allZeros, gamePhase) {
-            if (allZeros && gamePhase == GamePhase.PLAYING) {
-                val isHost = pub.lobby?.hostId == localId
-                if (isHost && conn != null) {
-                    conn.submitEvent(PeerEvent.PhaseChanged(GamePhase.WIN_COUNTDOWN))
-                }
-            }
-        }
-
-        // Vote tallying: host checks if all votes are in
-        val voteCount = pub.votes.size
-        val lobbyPlayerCount = pub.lobby?.players?.size ?: 0
-        LaunchedEffect(voteCount, lobbyPlayerCount) {
-            if (gamePhase == GamePhase.VOTING && voteCount >= lobbyPlayerCount && lobbyPlayerCount > 0) {
-                val isHost = pub.lobby?.hostId == localId
-                if (isHost && conn != null) {
-                    val playAgain = pub.votes.values.count { it == VoteChoice.PLAY_AGAIN }
-                    val endLobby = pub.votes.values.count { it == VoteChoice.END_LOBBY }
-                    if (endLobby > playAgain) {
-                        conn.submitEvent(PeerEvent.PhaseChanged(GamePhase.ENDED))
-                    } else {
-                        // Play again: reset and start new game
-                        conn.submitEvent(PeerEvent.PhaseChanged(GamePhase.WAITING))
+                GamePhase.WAITING -> {
+                    // After play-again vote, return to lobby
+                    if (int.screen == Screen.VOTING || int.screen == Screen.GAME) {
                         internalState.update { it.copy(screen = Screen.LOBBY) }
                     }
                 }
+                else -> {}
             }
-        }
-
-        // --- Event handlers ---
-
-        val onSubmitEvent: suspend (PeerEvent) -> Unit = { event ->
-            conn?.submitEvent(event)
         }
 
         // --- Render ---
@@ -149,47 +103,34 @@ fun App() {
             ) { screen ->
                 when (screen) {
                     Screen.HOME -> {
-                        // Derive home screen data from public state
                         val peers = pub.discoveredPeers.values
                             .filter { it.id != localId }
                             .toList()
-                        val incomingInvites = pub.pendingInvites.filter { it.toId == localId }
-                        val sentInviteIds = pub.pendingInvites.filter { it.fromId == localId }.map { it.toId }.toSet()
-                        val lobbyPlayers = pub.lobby?.players?.entries?.map { (id, lp) ->
+
+                        // Show lobby card only if our lobby has more than just us
+                        val lobbyPlayers = myLobby?.players?.entries?.map { (id, lp) ->
                             PeerInfo(id = id, name = lp.name, address = "", port = 0)
                         } ?: emptyList()
+                        val showLobby = lobbyPlayers.size > 1
 
                         HomeScreen(
                             playerName = int.playerName,
                             peers = peers,
-                            lobbyPlayers = lobbyPlayers,
-                            incomingInvites = incomingInvites,
-                            sentInviteIds = sentInviteIds,
+                            lobbyPlayers = if (showLobby) lobbyPlayers else emptyList(),
                             onSettingsClick = {
                                 internalState.update { it.copy(showSettings = !it.showSettings) }
                             },
-                            onInvitePeer = { peerId ->
+                            onJoinPeer = { peerId ->
                                 coroutineScope.launch {
-                                    conn?.submitEvent(PeerEvent.InviteSent(fromId = localId, toId = peerId))
-                                }
-                            },
-                            onAcceptInvite = { invite ->
-                                coroutineScope.launch {
-                                    val lobbyId = generateId()
-                                    conn?.submitEvent(PeerEvent.InviteAccepted(
-                                        fromId = invite.fromId,
-                                        toId = invite.toId,
-                                        lobbyId = lobbyId,
-                                    ))
-                                    internalState.update { it.copy(screen = Screen.LOBBY) }
-                                }
-                            },
-                            onRejectInvite = { invite ->
-                                coroutineScope.launch {
-                                    conn?.submitEvent(PeerEvent.InviteRejected(
-                                        fromId = invite.fromId,
-                                        toId = invite.toId,
-                                    ))
+                                    // Find the lobby the target peer is in
+                                    val targetLobby = pub.lobbies.values.firstOrNull { peerId in it.players }
+                                    if (targetLobby != null) {
+                                        conn?.submitEvent(PeerEvent.JoinedLobby(
+                                            lobbyId = targetLobby.lobbyId,
+                                            playerId = localId,
+                                        ))
+                                        internalState.update { it.copy(screen = Screen.LOBBY) }
+                                    }
                                 }
                             },
                             onEnterLobby = {
@@ -199,42 +140,22 @@ fun App() {
                     }
 
                     Screen.LOBBY -> {
-                        val lobby = pub.lobby
+                        val lobby = myLobby
                         if (lobby != null) {
                             LobbyScreen(
                                 lobby = lobby,
                                 localPlayerId = localId,
-                                countdownValue = int.countdownValue,
+                                countdownValue = countdownValue,
                                 onToggleReady = {
                                     coroutineScope.launch {
                                         val currentReady = lobby.players[localId]?.isReady ?: false
-                                        conn?.submitEvent(PeerEvent.ReadyChanged(localId, !currentReady))
-
-                                        // Check if all ready after toggling to ready
-                                        if (!currentReady) {
-                                            // Small delay to let event propagate
-                                            delay(200)
-                                            val updatedLobby = publicState.value.lobby
-                                            if (updatedLobby != null &&
-                                                updatedLobby.players.size >= 2 &&
-                                                updatedLobby.players.values.all { it.isReady }
-                                            ) {
-                                                val isHost = updatedLobby.hostId == localId
-                                                if (isHost) {
-                                                    // Generate initial values and start game
-                                                    val values = updatedLobby.players.keys.associateWith {
-                                                        generateRandomOddNumber()
-                                                    }
-                                                    conn?.submitEvent(PeerEvent.GameStarted(values))
-                                                }
-                                            }
-                                        }
+                                        conn?.submitEvent(PeerEvent.ReadyChanged(lobby.lobbyId, localId, !currentReady))
                                     }
                                 },
                                 onLeaveLobby = {
                                     coroutineScope.launch {
-                                        conn?.submitEvent(PeerEvent.LeftLobby(localId))
-                                        internalState.update { it.copy(screen = Screen.HOME, countdownValue = null) }
+                                        conn?.submitEvent(PeerEvent.LeftLobby(lobby.lobbyId, localId))
+                                        internalState.update { it.copy(screen = Screen.HOME) }
                                     }
                                 }
                             )
@@ -242,17 +163,19 @@ fun App() {
                     }
 
                     Screen.GAME -> {
+                        val lobby = myLobby
                         GameScreen(
-                            playerValues = pub.playerValues,
-                            playerNames = pub.lobby?.players?.mapValues { it.value.name } ?: emptyMap(),
-                            gamePhase = pub.gamePhase,
+                            playerValues = lobby?.playerValues ?: emptyMap(),
+                            playerNames = lobby?.players?.mapValues { it.value.name } ?: emptyMap(),
+                            gamePhase = lobby?.gamePhase ?: GamePhase.WAITING,
                             localPlayerId = localId,
-                            countdownValue = int.countdownValue,
+                            countdownValue = countdownValue,
                             onButtonPress = { targetPlayerId ->
                                 coroutineScope.launch {
-                                    if (pub.gamePhase == GamePhase.PLAYING) {
+                                    if (lobby != null && lobby.gamePhase == GamePhase.PLAYING) {
                                         val delta = if (targetPlayerId == localId) -2 else 1
                                         conn?.submitEvent(PeerEvent.ButtonPress(
+                                            lobbyId = lobby.lobbyId,
                                             sourceId = localId,
                                             targetId = targetPlayerId,
                                             delta = delta,
@@ -264,15 +187,15 @@ fun App() {
                     }
 
                     Screen.VOTING -> {
-                        val lobby = pub.lobby
+                        val lobby = myLobby
                         if (lobby != null) {
                             VotingScreen(
                                 lobbyPlayers = lobby.players,
-                                votes = pub.votes,
+                                votes = lobby.votes,
                                 localPlayerId = localId,
                                 onVote = { choice ->
                                     coroutineScope.launch {
-                                        conn?.submitEvent(PeerEvent.VoteCast(localId, choice))
+                                        conn?.submitEvent(PeerEvent.VoteCast(lobby.lobbyId, localId, choice))
                                     }
                                 }
                             )

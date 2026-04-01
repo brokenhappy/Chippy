@@ -1,5 +1,7 @@
 package com.woutwerkman.net
 
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
@@ -129,7 +131,7 @@ private class AndroidPeerTransport(
 
     private suspend fun handshakeMaintenance() {
         while (isRunning) {
-            delay(1000)
+            delay(1.seconds)
             
             // Emulator-to-Host proactive discovery
             if (localAddress == "10.0.2.15") {
@@ -173,7 +175,7 @@ private class AndroidPeerTransport(
             // Fallback query
             scope.launch {
                 while (isRunning) {
-                    delay(5000)
+                    delay(5.seconds)
                     try {
                         val services = jmdns?.list(serviceType)
                         services?.forEach { handlePeerDiscovered(it.name) }
@@ -276,7 +278,7 @@ private class AndroidPeerTransport(
             println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Adding 10.0.2.2 as alternative.")
             // We can't easily add an alternative, but we can try to send HELLO to 10.0.2.2 too
             scope?.launch {
-                delay(500)
+                delay(500.milliseconds)
                 sendUdp("10.0.2.2", pPort, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
             }
         }

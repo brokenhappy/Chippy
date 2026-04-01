@@ -9,7 +9,6 @@ data class InternalState(
     val screen: Screen = Screen.HOME,
     val playerName: String = generateRandomName(),
     val showSettings: Boolean = false,
-    val countdownValue: Int? = null,
 )
 
 /**

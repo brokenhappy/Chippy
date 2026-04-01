@@ -17,8 +17,8 @@ class InMemoryPeerNet {
     private var useLinks = false
 
     fun addPeer(peerId: String, displayName: String): InMemoryPeer {
-        val incoming = Channel<RawPeerMessage>(Channel.BUFFERED)
-        val outgoing = Channel<PeerCommand>(Channel.BUFFERED)
+        val incoming = Channel<RawPeerMessage>(Channel.UNLIMITED)
+        val outgoing = Channel<PeerCommand>(Channel.UNLIMITED)
         val rawConnection = RawPeerNetConnection(peerId, incoming, outgoing)
         val peer = InMemoryPeer(peerId, displayName, rawConnection, incoming, outgoing)
         peers[peerId] = peer
@@ -34,6 +34,16 @@ class InMemoryPeerNet {
         useLinks = true
         links.add(Pair(peerIdA, peerIdB))
         links.add(Pair(peerIdB, peerIdA))
+    }
+
+    /**
+     * Remove a direct link between two peers and deliver Disconnected events.
+     */
+    suspend fun unlink(peerIdA: String, peerIdB: String) {
+        links.remove(Pair(peerIdA, peerIdB))
+        links.remove(Pair(peerIdB, peerIdA))
+        peers[peerIdA]?.incoming?.send(RawPeerMessage.Event.Disconnected(peerIdB))
+        peers[peerIdB]?.incoming?.send(RawPeerMessage.Event.Disconnected(peerIdA))
     }
 
     private fun canReach(from: String, to: String): Boolean {

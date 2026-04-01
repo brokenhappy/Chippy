@@ -1,5 +1,6 @@
 package com.woutwerkman.net
 
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
@@ -133,7 +134,7 @@ private class JvmPeerTransport(
      */
     private suspend fun handshakeMaintenance() {
         while (isRunning) {
-            delay(1000)
+            delay(1.seconds)
 
             peerStates.values.forEach { state ->
                 // If we see them via discovery but handshake isn't complete, send HELLO

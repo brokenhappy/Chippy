@@ -1,5 +1,6 @@
 package com.woutwerkman.net
 
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 
@@ -102,7 +103,7 @@ private suspend fun CoroutineScope.verifyConnectivity(
         println("[${config.instanceId}] Peers: ${finalState.discoveredPeers.values.map { "${it.name} (${it.id})" }}")
 
         // Keep connection alive so slower peers can complete their handshakes
-        delay(5000)
+        delay(5.seconds)
         println("[${config.instanceId}] SUCCESS: All platforms connected via linearized peer network!")
         return ConnectivityTestResult.Success
     } catch (e: CancellationException) {

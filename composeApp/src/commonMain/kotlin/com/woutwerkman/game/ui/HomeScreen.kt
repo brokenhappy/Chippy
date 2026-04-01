@@ -19,11 +19,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.woutwerkman.net.PeerInfo
 
+data class ForeignLobby(
+    val lobbyId: String,
+    val players: List<PeerInfo>,
+)
+
 @Composable
 fun HomeScreen(
     playerName: String,
     peers: List<PeerInfo>,
     lobbyPlayers: List<PeerInfo>,
+    foreignLobbies: List<ForeignLobby> = emptyList(),
     onSettingsClick: () -> Unit,
     onJoinPeer: (String) -> Unit,
     onEnterLobby: () -> Unit
@@ -85,6 +91,27 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
+        // Foreign lobbies (other players' lobbies with 2+ members)
+        if (foreignLobbies.isNotEmpty()) {
+            Text(
+                text = "Lobbies",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            foreignLobbies.forEach { lobby ->
+                ConnectedGroupCard(
+                    players = lobby.players,
+                    onClick = { onJoinPeer(lobby.players.first().id) }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         // Nearby peers section
         Text(
             text = "Nearby Players",
@@ -94,11 +121,12 @@ fun HomeScreen(
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Filter out players already in our lobby
+        // Filter out players already in our lobby or in a foreign lobby
         val lobbyPlayerIds = lobbyPlayers.map { it.id }.toSet()
-        val availablePeers = peers.filter { it.id !in lobbyPlayerIds }
+        val foreignLobbyPlayerIds = foreignLobbies.flatMap { it.players.map { p -> p.id } }.toSet()
+        val availablePeers = peers.filter { it.id !in lobbyPlayerIds && it.id !in foreignLobbyPlayerIds }
 
-        if (availablePeers.isEmpty() && lobbyPlayers.isEmpty()) {
+        if (availablePeers.isEmpty() && lobbyPlayers.isEmpty() && foreignLobbies.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(

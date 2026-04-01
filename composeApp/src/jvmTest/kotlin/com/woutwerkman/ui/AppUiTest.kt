@@ -132,6 +132,46 @@ class AppUiTest {
     }
 
     @Test
+    fun foreignLobbyVisibleToObserver() = runComposeUiTest {
+        // C sees A and B. A and B are in a lobby together.
+        // C should see that lobby on the home screen (not just individual players).
+        val setup = createTestSetup(localId = "C", localName = "Charlie")
+        setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("A", "Alice", "test", 0)))
+        setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("B", "Bob", "test", 0)))
+        setup.conn.applyEvent(PeerEvent.JoinedLobby("A", "B"))
+        setAppContent(setup)
+
+        // C should see the foreign lobby section
+        onNodeWithText("Lobbies").assertExists()
+        // The lobby card should show it has 2 players
+        onNodeWithText("2 players connected").assertExists()
+        // Player names should appear in the lobby card
+        onNodeWithText("Alice", substring = true).assertExists()
+        onNodeWithText("Bob", substring = true).assertExists()
+        // Should NOT show "Searching for nearby players..." since we have foreign lobbies
+        onNodeWithText("Searching for nearby players...").assertDoesNotExist()
+    }
+
+    @Test
+    fun foreignLobbyPeersNotDuplicatedInNearbyList() = runComposeUiTest {
+        // A and B are in a lobby, D is solo. C should see the lobby card
+        // for A+B and D as an individual nearby player, but NOT A or B individually.
+        val setup = createTestSetup(localId = "C", localName = "Charlie")
+        setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("A", "Alice", "test", 0)))
+        setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("B", "Bob", "test", 0)))
+        setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("D", "Diana", "test", 0)))
+        setup.conn.applyEvent(PeerEvent.JoinedLobby("A", "B"))
+        setAppContent(setup)
+
+        // Foreign lobby card should exist
+        onNodeWithText("2 players connected").assertExists()
+        // Diana should appear as individual nearby player
+        onNodeWithText("Diana").assertExists()
+        // "Tap to join" should appear (for Diana's individual card)
+        onNodeWithText("Tap to join").assertExists()
+    }
+
+    @Test
     fun lobbyCardShowsWhenMultiplePlayersInLobby() = runComposeUiTest {
         val setup = createTestSetup()
         setup.conn.applyEvent(PeerEvent.Joined(PeerInfo("remote", "Bob", "test", 0)))

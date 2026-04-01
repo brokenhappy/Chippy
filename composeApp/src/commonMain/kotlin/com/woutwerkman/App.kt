@@ -123,10 +123,23 @@ fun AppContent(
                     } ?: emptyList()
                     val showLobby = lobbyPlayers.size > 1
 
+                    // Foreign lobbies: lobbies with 2+ players that we're not in
+                    val foreignLobbies = pub.lobbies.values
+                        .filter { it.players.size > 1 && localId !in it.players }
+                        .map { lobby ->
+                            ForeignLobby(
+                                lobbyId = lobby.lobbyId,
+                                players = lobby.players.entries.map { (id, lp) ->
+                                    PeerInfo(id = id, name = lp.name, address = "", port = 0)
+                                },
+                            )
+                        }
+
                     HomeScreen(
                         playerName = int.playerName,
                         peers = peers,
                         lobbyPlayers = if (showLobby) lobbyPlayers else emptyList(),
+                        foreignLobbies = foreignLobbies,
                         onSettingsClick = {
                             internalState.update { it.copy(showSettings = !it.showSettings) }
                         },

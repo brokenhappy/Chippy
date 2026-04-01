@@ -118,7 +118,17 @@ fun Pair<PeerNetState, TimedEvent?>.after(event: PeerEvent): Pair<PeerNetState, 
 private fun PeerNetState.applyEvent(event: PeerEvent): PeerNetState = when (event) {
     is PeerEvent.Joined -> {
         val peer = event.peer
-        val updatedLobbies = if (peer.id in lobbies) lobbies else {
+        val updatedLobbies = if (peer.id in lobbies) {
+            // Lobby already exists (possibly created by an early JoinedLobby due to clock skew).
+            // Update the host's player name in case it was a placeholder.
+            val existing = lobbies[peer.id]!!
+            val updatedPlayers = if (peer.id in existing.players) {
+                existing.players + (peer.id to existing.players[peer.id]!!.copy(name = peer.name))
+            } else {
+                existing.players + (peer.id to LobbyPlayer(peer.name))
+            }
+            lobbies + (peer.id to existing.copy(players = updatedPlayers))
+        } else {
             val soloLobby = LobbyInfo(
                 lobbyId = peer.id,
                 hostId = peer.id,
@@ -141,7 +151,16 @@ private fun PeerNetState.applyEvent(event: PeerEvent): PeerNetState = when (even
         )
     }
     is PeerEvent.JoinedLobby -> {
-        val targetLobby = lobbies[event.lobbyId] ?: return this
+        val targetLobby = lobbies[event.lobbyId] ?: run {
+            // Lobby doesn't exist yet — host's Joined event may arrive later (clock skew).
+            // Create a placeholder lobby so the join isn't lost.
+            val hostName = discoveredPeers[event.lobbyId]?.name ?: event.lobbyId
+            LobbyInfo(
+                lobbyId = event.lobbyId,
+                hostId = event.lobbyId,
+                players = mapOf(event.lobbyId to LobbyPlayer(hostName)),
+            )
+        }
         val name = discoveredPeers[event.playerId]?.name ?: "Unknown"
         val afterLeave = lobbies
             .mapValues { (_, l) -> l.copy(players = l.players - event.playerId) }

@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Instant
@@ -196,6 +197,67 @@ class ConnectivityRoutingTest {
         // C should only see itself
         tickUntil { setup.states["C"]!!.value.discoveredPeers.size == 1 }
         assertEquals(setOf("C"), setup.states["C"]!!.value.discoveredPeers.keys)
+
+        infra.cancel()
+        setup.net.close()
+    }
+
+    @Test
+    fun observerSeesLobbyJoinByOtherPeers() = runTest {
+        // A, B, C all connected (full mesh). B joins A's lobby.
+        // C (observer, not in lobby) should see lobby "A" with both A and B.
+        val setup = createPeers("A" to "Alice", "B" to "Bob", "C" to "Charlie")
+        val clock = testClock()
+
+        val infra = launchInfra(setup, clock)
+        tick()
+        setup.net.connectAll()
+        tickUntil { setup.states["C"]!!.value.discoveredPeers.size >= 3 }
+
+        // B joins A's lobby
+        val ewt = EventWithTime(clock.now(), "B", PeerEvent.JoinedLobby("A", "B"))
+        setup.channels["B"]!!.send(ewt)
+        setup.localChannels["B"]!!.send(ewt)
+        tick(2500)
+
+        // C should see lobby "A" with both A and B
+        val lobbyOnC = setup.states["C"]!!.value.lobbies["A"]
+        assertNotNull(lobbyOnC, "C should see lobby 'A'")
+        assertTrue(lobbyOnC.players.containsKey("A"), "Lobby on C should contain A")
+        assertTrue(lobbyOnC.players.containsKey("B"), "Lobby on C should contain B")
+        assertEquals(2, lobbyOnC.players.size, "Lobby on C should have exactly 2 players")
+
+        infra.cancel()
+        setup.net.close()
+    }
+
+    @Test
+    fun observerSeesLobbyJoinThroughBridge() = runTest {
+        // A ↔ B ↔ C (bridge topology). B joins A's lobby.
+        // C (observer, not directly connected to A) should see lobby "A" with both A and B.
+        val setup = createPeers("A" to "Alice", "B" to "Bob", "C" to "Charlie")
+        val clock = testClock()
+        setup.net.link("A", "B")
+        setup.net.link("B", "C")
+
+        val infra = launchInfra(setup, clock)
+        tick()
+        setup.net.connectAll()
+        tick(2500)
+        tickUntil { setup.states["C"]!!.value.discoveredPeers.size >= 3 }
+
+        // B joins A's lobby
+        val ewt = EventWithTime(clock.now(), "B", PeerEvent.JoinedLobby("A", "B"))
+        setup.channels["B"]!!.send(ewt)
+        setup.localChannels["B"]!!.send(ewt)
+        tick(2500)
+
+        // C should see lobby "A" with both A and B
+        val lobbyOnC = setup.states["C"]!!.value.lobbies["A"]
+        assertNotNull(lobbyOnC, "C should see lobby 'A'")
+        assertTrue(lobbyOnC.players.containsKey("A"), "Lobby on C should contain A")
+        assertTrue(lobbyOnC.players.containsKey("B"), "Lobby on C should contain B")
+        assertEquals(2, lobbyOnC.players.size, "Lobby on C should have exactly 2 players")
 
         infra.cancel()
         setup.net.close()

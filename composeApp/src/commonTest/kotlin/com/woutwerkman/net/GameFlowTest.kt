@@ -66,6 +66,41 @@ class GameFlowTest {
     }
 
     // -----------------------------------------------------------------------
+    // Out-of-order: JoinedLobby before Joined (clock skew)
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun joinedLobbyBeforeJoinedStillWorks() {
+        // Simulates clock skew: B's JoinedLobby event arrives before A's Joined event
+        // in the fold's replay order. The fold must not silently discard JoinedLobby.
+        val (state, _) = PeerNetState()
+            .after(joined("B", "Bob"))
+            .after(PeerEvent.JoinedLobby(lobbyId = "A", playerId = "B"))
+            .after(joined("A", "Alice"))
+
+        val lobby = state.lobbies["A"]
+        assertNotNull(lobby, "Lobby 'A' should exist even when Joined(A) arrives after JoinedLobby")
+        assertTrue(lobby.players.containsKey("A"), "A should be in lobby")
+        assertTrue(lobby.players.containsKey("B"), "B should be in lobby despite JoinedLobby arriving before Joined(A)")
+        assertEquals("Alice", lobby.players["A"]?.name, "A's name should be correct")
+        assertEquals("Bob", lobby.players["B"]?.name, "B's name should be correct")
+    }
+
+    @Test
+    fun joinedLobbyForCompletelyUnknownHostStillWorks() {
+        // Extreme case: JoinedLobby("A", "B") when neither A nor B's Joined has been processed
+        val (state, _) = PeerNetState()
+            .after(PeerEvent.JoinedLobby(lobbyId = "A", playerId = "B"))
+            .after(joined("A", "Alice"))
+            .after(joined("B", "Bob"))
+
+        val lobby = state.lobbies["A"]
+        assertNotNull(lobby, "Lobby 'A' should exist")
+        assertTrue(lobby.players.containsKey("A"), "A should be in lobby")
+        assertTrue(lobby.players.containsKey("B"), "B should be in lobby")
+    }
+
+    // -----------------------------------------------------------------------
     // Two independent lobbies
     // -----------------------------------------------------------------------
 

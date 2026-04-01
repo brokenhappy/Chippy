@@ -30,6 +30,11 @@ kotlin {
     }
     
     sourceSets {
+        // Share web server code between JVM desktop and Android (both run on JVM)
+        val jvmSharedDir = "src/jvmSharedMain/kotlin"
+        jvmMain.get().kotlin.srcDir(jvmSharedDir)
+        androidMain.get().kotlin.srcDir(jvmSharedDir)
+
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
@@ -77,13 +82,18 @@ kotlin {
             implementation(libs.ktor.server.netty)
             implementation(libs.ktor.server.websockets)
             implementation(libs.ktor.network.tls.certificates)
-            implementation(libs.jmdns)
             implementation(libs.qrcode.kotlin)
+            implementation(libs.jmdns)
         }
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.ktor.client.cio)
+            implementation(libs.ktor.server.core)
+            implementation(libs.ktor.server.netty)
+            implementation(libs.ktor.server.websockets)
+            implementation(libs.ktor.network.tls.certificates)
+            implementation(libs.qrcode.kotlin)
             implementation(libs.jmdns)
         }
         iosMain.dependencies {
@@ -106,6 +116,8 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/INDEX.LIST"
+            excludes += "/META-INF/io.netty.versions.properties"
         }
     }
     buildTypes {

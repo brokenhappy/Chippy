@@ -81,6 +81,7 @@ data class TimedEvent(
  *     .after(PeerEvent.JoinedLobby("A", "B"))  // B joins A's lobby
  * ```
  */
+@Serializable
 data class PeerNetState(
     /** All peers currently visible on the network. */
     val discoveredPeers: Map<String, PeerInfo> = emptyMap(),
@@ -438,6 +439,7 @@ internal fun deterministicPlayerValues(lobbyId: String, round: Int, playerIds: S
  * Every peer starts in their own solo lobby. Tapping another peer joins their lobby.
  * Game-phase state is scoped per-lobby so multiple independent lobbies can coexist.
  */
+@Serializable
 data class LobbyInfo(
     val lobbyId: String,
     val hostId: String,
@@ -450,6 +452,7 @@ data class LobbyInfo(
 )
 
 /** A player in a lobby. */
+@Serializable
 data class LobbyPlayer(val name: String, val isReady: Boolean = false)
 
 // ---------------------------------------------------------------------------

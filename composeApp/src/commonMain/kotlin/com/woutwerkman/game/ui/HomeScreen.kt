@@ -30,10 +30,13 @@ fun HomeScreen(
     peers: List<PeerInfo>,
     lobbyPlayers: List<PeerInfo>,
     foreignLobbies: List<ForeignLobby> = emptyList(),
+    webHostUrl: String? = null,
+    webHostQrBytes: ByteArray? = null,
     onSettingsClick: () -> Unit,
     onJoinPeer: (String) -> Unit,
     onEnterLobby: () -> Unit
 ) {
+    var showShareDialog by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -59,15 +62,31 @@ fun HomeScreen(
                 )
             }
 
-            IconButton(
-                onClick = onSettingsClick,
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
-                    .testTag("settings-button")
-            ) {
-                Text("⚙", fontSize = 24.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (webHostUrl != null) {
+                    IconButton(
+                        onClick = { showShareDialog = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.tertiaryContainer)
+                            .testTag("share-button")
+                    ) {
+                        Text("Share", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer)
+                    }
+                }
+
+                IconButton(
+                    onClick = onSettingsClick,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.secondaryContainer)
+                        .testTag("settings-button")
+                ) {
+                    Text("⚙", fontSize = 24.sp)
+                }
             }
         }
 
@@ -190,6 +209,66 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showShareDialog && webHostUrl != null) {
+        AlertDialog(
+            onDismissRequest = { showShareDialog = false },
+            title = { Text("Invite Players") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Scan the QR code or share the link:",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (webHostQrBytes != null) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        val qrBitmap = remember(webHostQrBytes) {
+                            decodeImageBitmap(webHostQrBytes)
+                        }
+                        androidx.compose.foundation.Image(
+                            bitmap = qrBitmap,
+                            contentDescription = "QR code for $webHostUrl",
+                            modifier = Modifier
+                                .size(200.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.White)
+                                .padding(8.dp),
+                            filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Text(
+                            text = webHostUrl,
+                            modifier = Modifier.padding(16.dp),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Make sure they're on the same WiFi network",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showShareDialog = false }) {
+                    Text("Done")
+                }
+            }
+        )
     }
 }
 

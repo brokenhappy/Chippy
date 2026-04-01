@@ -20,6 +20,7 @@ enum class Screen {
     VOTING
 }
 
+@kotlinx.serialization.Serializable
 enum class GamePhase {
     WAITING,
     COUNTDOWN,
@@ -29,6 +30,7 @@ enum class GamePhase {
     ENDED
 }
 
+@kotlinx.serialization.Serializable
 enum class VoteChoice {
     PLAY_AGAIN,
     END_LOBBY

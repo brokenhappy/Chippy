@@ -73,7 +73,12 @@ kotlin {
             }
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.ktor.client.cio)
+            implementation(libs.ktor.server.core)
+            implementation(libs.ktor.server.netty)
+            implementation(libs.ktor.server.websockets)
+            implementation(libs.ktor.network.tls.certificates)
             implementation(libs.jmdns)
+            implementation(libs.qrcode.kotlin)
         }
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)

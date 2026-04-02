@@ -9,6 +9,7 @@ import kotlinx.coroutines.channels.SendChannel
 import platform.Foundation.*
 import platform.darwin.*
 import platform.posix.*
+import kotlin.concurrent.AtomicReference
 import kotlin.random.Random
 
 private const val MESSAGE_PORT = 47391
@@ -53,19 +54,59 @@ private fun htons(value: UShort): UShort =
  */
 private data class PeerState(
     val info: PeerInfo,
-    var weSeeThemViaDiscovery: Boolean = false,
-    var weSentHello: Boolean = false,
-    var theyAckedUs: Boolean = false,
-    var weAckedThem: Boolean = false,
-    var isJoined: Boolean = false
+    val weSeeThemViaDiscovery: Boolean = false,
+    val weSentHello: Boolean = false,
+    val theyAckedUs: Boolean = false,
+    val weAckedThem: Boolean = false,
+    val isJoined: Boolean = false,
 )
+
+/**
+ * Thread-safe peer state map using compare-and-set on an immutable map snapshot.
+ * All mutations atomically replace the entire map, so readers always see a consistent state.
+ */
+private class AtomicPeerStates {
+    private val ref = AtomicReference(emptyMap<String, PeerState>())
+
+    fun snapshot(): Map<String, PeerState> = ref.value
+
+    /** Atomically update a single peer's state. Returns the new state, or null if peer not found. */
+    inline fun update(peerId: String, transform: (PeerState) -> PeerState): PeerState? {
+        while (true) {
+            val current = ref.value
+            val existing = current[peerId] ?: return null
+            val updated = transform(existing)
+            if (ref.compareAndSet(current, current + (peerId to updated))) return updated
+        }
+    }
+
+    /** Atomically compute a new value for [peerId]. The [transform] receives the current state (or null). */
+    inline fun compute(peerId: String, transform: (PeerState?) -> PeerState?): PeerState? {
+        while (true) {
+            val current = ref.value
+            val result = transform(current[peerId])
+            val newMap = if (result != null) current + (peerId to result) else current - peerId
+            if (ref.compareAndSet(current, newMap)) return result
+        }
+    }
+
+    /** Insert [peerId] if absent, using [default] to create the initial value. Returns the existing or new state. */
+    inline fun getOrPut(peerId: String, default: () -> PeerState): PeerState {
+        while (true) {
+            val current = ref.value
+            current[peerId]?.let { return it }
+            val newState = default()
+            if (ref.compareAndSet(current, current + (peerId to newState))) return newState
+        }
+    }
+}
 
 /**
  * Events from discovery callbacks (Bonjour), bridged into the coroutine world.
  */
 private sealed class DiscoveryEvent {
     data class ServiceResolved(val service: NSNetService) : DiscoveryEvent()
-    data class PeerJoined(val state: PeerState) : DiscoveryEvent()
+    data class PeerJoined(val peerId: String) : DiscoveryEvent()
 }
 
 /**
@@ -81,7 +122,7 @@ private suspend fun <T> withIosPeerTransport(
     block: suspend CoroutineScope.((ByteArray) -> Unit) -> T,
 ): T {
     val serviceType = "_${config.serviceName}._udp."
-    val peerStates = mutableMapOf<String, PeerState>()
+    val peerStates = AtomicPeerStates()
     val discoveryEvents = Channel<DiscoveryEvent>(Channel.BUFFERED)
 
     NSLog("[PeerNet-$peerId] Starting peer discovery")
@@ -94,7 +135,7 @@ private suspend fun <T> withIosPeerTransport(
 
     val broadcastFn: (ByteArray) -> Unit = { payload ->
         val message = "$peerId:${payload.decodeToString()}"
-        peerStates.values.forEach { state ->
+        peerStates.snapshot().values.forEach { state ->
             sendUdp(state.info.address, state.info.port, message)
         }
     }
@@ -134,10 +175,10 @@ private suspend fun <T> withIosPeerTransport(
 
                     delay(50.milliseconds)
 
-                    peerStates.values.toList().forEach { state ->
+                    peerStates.snapshot().forEach { (pId, state) ->
                         if (state.weSeeThemViaDiscovery && !state.isJoined) {
                             sendHandshakeHello(peerId, config.displayName, localAddress, boundPort, state.info)
-                            state.weSentHello = true
+                            peerStates.update(pId) { it.copy(weSentHello = true) }
                         }
                     }
                 }
@@ -219,7 +260,7 @@ private fun startBonjour(
 
 private suspend fun processDiscoveryEvents(
     events: ReceiveChannel<DiscoveryEvent>,
-    peerStates: MutableMap<String, PeerState>,
+    peerStates: AtomicPeerStates,
     incomingChannel: SendChannel<RawPeerMessage>,
     peerId: String,
     peerName: String,
@@ -241,22 +282,28 @@ private suspend fun processDiscoveryEvents(
                     if (pId == peerId) continue
 
                     val peerInfo = PeerInfo(id = pId, name = discoveredName, address = peerAddr, port = peerPort)
-                    val state = peerStates.getOrPut(pId) {
+                    peerStates.getOrPut(pId) {
                         NSLog("[PeerNet-$peerId] Discovered via mDNS: $discoveredName ($pId) at $peerAddr:$peerPort")
                         PeerState(info = peerInfo)
                     }
-                    state.weSeeThemViaDiscovery = true
+                    peerStates.update(pId) { it.copy(weSeeThemViaDiscovery = true, weSentHello = true) }
 
                     sendHandshakeHello(peerId, peerName, localAddress, boundPort, peerInfo)
-                    state.weSentHello = true
                 }
             }
             is DiscoveryEvent.PeerJoined -> {
-                val state = event.state
-                if (!state.isJoined) {
-                    state.isJoined = true
-                    NSLog("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
-                    incomingChannel.send(RawPeerMessage.Event.Connected(state.info))
+                var connected: PeerInfo? = null
+                peerStates.compute(event.peerId) { existing ->
+                    if (existing != null && !existing.isJoined) {
+                        connected = existing.info
+                        existing.copy(isJoined = true)
+                    } else {
+                        existing
+                    }
+                }
+                connected?.let { info ->
+                    NSLog("[PeerNet-$peerId] Peer JOINED: ${info.name} (${info.id})")
+                    incomingChannel.send(RawPeerMessage.Event.Connected(info))
                 }
             }
         }
@@ -311,7 +358,7 @@ private fun getSocketBoundPort(fd: Int): Int = memScoped {
 private suspend fun receiveLoop(
     udpSocket: Int,
     peerId: String,
-    peerStates: MutableMap<String, PeerState>,
+    peerStates: AtomicPeerStates,
     incomingChannel: SendChannel<RawPeerMessage>,
     discoveryEvents: SendChannel<DiscoveryEvent>,
 ) {
@@ -362,8 +409,7 @@ private suspend fun receiveLoop(
                                     handleAckReceived(fromPeerId, peerId, peerStates, discoveryEvents)
                                 }
                                 else -> {
-                                    val state = peerStates[fromPeerId]
-                                    if (state != null) {
+                                    if (peerStates.snapshot().containsKey(fromPeerId)) {
                                         incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
                                     }
                                 }
@@ -382,7 +428,7 @@ private fun handleHelloReceived(
     payload: String,
     fromAddress: String,
     peerId: String,
-    peerStates: MutableMap<String, PeerState>,
+    peerStates: AtomicPeerStates,
     discoveryEvents: SendChannel<DiscoveryEvent>,
 ) {
     val helloData = payload.removePrefix(HANDSHAKE_HELLO)
@@ -397,33 +443,33 @@ private fun handleHelloReceived(
 
     val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
 
-    val state = peerStates.getOrPut(fromPeerId) {
+    peerStates.getOrPut(fromPeerId) {
         NSLog("[PeerNet-$peerId] Received HELLO from new peer: $pName ($fromPeerId) at $pAddr:$pPort")
         PeerState(info = peerInfo)
     }
-    state.weSeeThemViaDiscovery = true
+    val state = peerStates.update(fromPeerId) {
+        it.copy(info = peerInfo, weSeeThemViaDiscovery = true, weAckedThem = true)
+    }
 
     sendHandshakeAck(peerId, peerInfo)
-    state.weAckedThem = true
 
-    checkAndEmitJoined(state, discoveryEvents)
+    if (state != null) checkAndEmitJoined(fromPeerId, state, discoveryEvents)
 }
 
 private fun handleAckReceived(
     fromPeerId: String,
     peerId: String,
-    peerStates: MutableMap<String, PeerState>,
+    peerStates: AtomicPeerStates,
     discoveryEvents: SendChannel<DiscoveryEvent>,
 ) {
-    val state = peerStates[fromPeerId] ?: return
     NSLog("[PeerNet-$peerId] Received ACK from: $fromPeerId")
-    state.theyAckedUs = true
-    checkAndEmitJoined(state, discoveryEvents)
+    val state = peerStates.update(fromPeerId) { it.copy(theyAckedUs = true) } ?: return
+    checkAndEmitJoined(fromPeerId, state, discoveryEvents)
 }
 
-private fun checkAndEmitJoined(state: PeerState, discoveryEvents: SendChannel<DiscoveryEvent>) {
+private fun checkAndEmitJoined(peerId: String, state: PeerState, discoveryEvents: SendChannel<DiscoveryEvent>) {
     if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
-        discoveryEvents.trySend(DiscoveryEvent.PeerJoined(state))
+        discoveryEvents.trySend(DiscoveryEvent.PeerJoined(peerId))
     }
 }
 
@@ -438,16 +484,17 @@ private fun sendHandshakeAck(peerId: String, peer: PeerInfo) {
     sendUdp(peer.address, peer.port, "$peerId:$payload")
 }
 
-private fun handleCommand(command: PeerCommand, peerId: String, peerStates: Map<String, PeerState>) {
+private fun handleCommand(command: PeerCommand, peerId: String, peerStates: AtomicPeerStates) {
+    val snapshot = peerStates.snapshot()
     when (command) {
         is PeerCommand.SendTo -> {
-            val state = peerStates[command.peerId]
+            val state = snapshot[command.peerId]
             if (state != null) {
                 sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
             }
         }
         is PeerCommand.Broadcast -> {
-            peerStates.values.forEach { state ->
+            snapshot.values.forEach { state ->
                 sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
             }
         }

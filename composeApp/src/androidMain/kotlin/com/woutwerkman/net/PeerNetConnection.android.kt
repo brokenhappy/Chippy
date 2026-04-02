@@ -56,12 +56,12 @@ private fun generatePeerId(): String {
  * Tracks the state of a discovered peer through the handshake process.
  */
 private data class PeerState(
-    var info: PeerInfo,
-    var weSeeThemViaDiscovery: Boolean = false,
-    var weSentHello: Boolean = false,
-    var theyAckedUs: Boolean = false,
-    var weAckedThem: Boolean = false,
-    var isJoined: Boolean = false
+    val info: PeerInfo,
+    val weSeeThemViaDiscovery: Boolean = false,
+    val weSentHello: Boolean = false,
+    val theyAckedUs: Boolean = false,
+    val weAckedThem: Boolean = false,
+    val isJoined: Boolean = false,
 )
 
 /**
@@ -70,7 +70,7 @@ private data class PeerState(
 private sealed class DiscoveryEvent {
     data class PeerDiscovered(val serviceName: String) : DiscoveryEvent()
     data class PeerRemoved(val serviceName: String) : DiscoveryEvent()
-    data class PeerJoined(val state: PeerState) : DiscoveryEvent()
+    data class PeerJoined(val peerId: String) : DiscoveryEvent()
     data class EmulatorProbe(val address: String, val port: Int, val helloPayload: String) : DiscoveryEvent()
 }
 
@@ -230,8 +230,7 @@ private suspend fun processDiscoveryEvents(
                             println("[PeerNet-$peerId] Peer discovered: $pName ($pId)")
                             PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
                         } else {
-                            existing.weSeeThemViaDiscovery = true
-                            existing
+                            existing.copy(weSeeThemViaDiscovery = true)
                         }
                     }
                     sendHandshakeHello(udpSocket, peerId, peerName, localAddress, localPort, peerInfo)
@@ -248,11 +247,18 @@ private suspend fun processDiscoveryEvents(
                 }
             }
             is DiscoveryEvent.PeerJoined -> {
-                val state = event.state
-                if (!state.isJoined) {
-                    state.isJoined = true
-                    println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
-                    incomingChannel.send(RawPeerMessage.Event.Connected(state.info))
+                var connected: PeerInfo? = null
+                peerStates.compute(event.peerId) { _, existing ->
+                    if (existing != null && !existing.isJoined) {
+                        connected = existing.info
+                        existing.copy(isJoined = true)
+                    } else {
+                        existing
+                    }
+                }
+                connected?.let { info ->
+                    println("[PeerNet-$peerId] Peer JOINED: ${info.name} (${info.id})")
+                    incomingChannel.send(RawPeerMessage.Event.Connected(info))
                 }
             }
             is DiscoveryEvent.EmulatorProbe -> {
@@ -280,10 +286,12 @@ private suspend fun handshakeMaintenance(
             sendUdp(udpSocket, "10.0.2.2", MESSAGE_PORT, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
         }
 
-        peerStates.values.forEach { state ->
+        peerStates.forEach { (pId, state) ->
             if (state.weSeeThemViaDiscovery && !state.isJoined) {
                 sendHandshakeHello(udpSocket, peerId, peerName, localAddress, localPort, state.info)
-                state.weSentHello = true
+                peerStates.compute(pId) { _, current ->
+                    current?.copy(weSentHello = true)
+                }
             }
         }
     }
@@ -378,13 +386,12 @@ private fun handleHelloReceived(
 
     val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
     val state = peerStates.compute(fromPeerId) { _, existing ->
-        if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
-        else { existing.info = peerInfo; existing.weSeeThemViaDiscovery = true; existing }
+        if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true, weAckedThem = true)
+        else existing.copy(info = peerInfo, weSeeThemViaDiscovery = true, weAckedThem = true)
     }!!
 
     sendHandshakeAck(udpSocket, peerId, peerInfo)
-    state.weAckedThem = true
-    checkAndEmitJoined(state, discoveryEvents)
+    checkAndEmitJoined(fromPeerId, state, discoveryEvents)
 }
 
 private fun handleAckReceived(
@@ -392,14 +399,15 @@ private fun handleAckReceived(
     peerStates: ConcurrentHashMap<String, PeerState>,
     discoveryEvents: SendChannel<DiscoveryEvent>,
 ) {
-    val state = peerStates[fromPeerId] ?: return
-    state.theyAckedUs = true
-    checkAndEmitJoined(state, discoveryEvents)
+    val state = peerStates.compute(fromPeerId) { _, existing ->
+        existing?.copy(theyAckedUs = true)
+    } ?: return
+    checkAndEmitJoined(fromPeerId, state, discoveryEvents)
 }
 
-private fun checkAndEmitJoined(state: PeerState, discoveryEvents: SendChannel<DiscoveryEvent>) {
+private fun checkAndEmitJoined(peerId: String, state: PeerState, discoveryEvents: SendChannel<DiscoveryEvent>) {
     if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
-        discoveryEvents.trySend(DiscoveryEvent.PeerJoined(state))
+        discoveryEvents.trySend(DiscoveryEvent.PeerJoined(peerId))
     }
 }
 

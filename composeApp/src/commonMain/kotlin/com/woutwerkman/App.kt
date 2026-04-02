@@ -23,7 +23,6 @@ fun App() {
         val publicState = remember { MutableStateFlow(PeerNetState()) }
         val connectionRef = remember { mutableStateOf<PeerNetConnection?>(null) }
         val webHostUrl = remember { mutableStateOf<String?>(null) }
-        val webHostQrBytes = remember { mutableStateOf<ByteArray?>(null) }
 
         val playerName by remember {
             internalState
@@ -37,19 +36,18 @@ fun App() {
                 connectionRef.value = conn
                 launch { conn.state.collect { publicState.value = it } }
 
-                // Start web client host (JVM/Android only; null on iOS)
-                val webHost = createWebClientHost(conn, publicState)
-                if (webHost != null) {
-                    webHost.start()
-                    webHostUrl.value = webHost.url
-                    webHostQrBytes.value = webHost.qrCodeBytes
+                launch {
+                    hostingWebClient(conn) { url ->
+                        webHostUrl.value = url
+                        awaitCancellation()
+                    }
                 }
 
                 awaitCancellation()
             }
         }
 
-        AppContent(connectionRef.value, publicState, internalState, webHostUrl.value, webHostQrBytes.value)
+        AppContent(connectionRef.value, publicState, internalState, webHostUrl.value)
     }
 }
 
@@ -59,7 +57,6 @@ fun AppContent(
     publicState: MutableStateFlow<PeerNetState>,
     internalState: MutableStateFlow<InternalState>,
     webHostUrl: String? = null,
-    webHostQrBytes: ByteArray? = null,
 ) {
     // Combine into WholeState
     val wholeState by combine(publicState, internalState) { pub, int ->
@@ -154,7 +151,6 @@ fun AppContent(
                         lobbyPlayers = if (showLobby) lobbyPlayers else emptyList(),
                         foreignLobbies = foreignLobbies,
                         webHostUrl = webHostUrl,
-                        webHostQrBytes = webHostQrBytes,
                         onSettingsClick = {
                             internalState.update { it.copy(showSettings = !it.showSettings) }
                         },

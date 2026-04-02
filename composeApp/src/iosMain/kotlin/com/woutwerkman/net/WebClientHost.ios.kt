@@ -1,8 +1,8 @@
 package com.woutwerkman.net
 
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.CoroutineScope
 
-actual fun createWebClientHost(
+actual suspend fun <T> hostingWebClient(
     connection: PeerNetConnection,
-    stateFlow: Flow<PeerNetState>,
-): WebClientHost? = null
+    block: suspend CoroutineScope.(url: String) -> T,
+): T = nativeHostingWebClient(connection, block)

@@ -8,7 +8,7 @@
 	<string>Chippy uses the local network to discover and connect with nearby players for multiplayer gaming.</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_chippy._udp</string>
+		<string>_chippy._udp.</string>
 	</array>
 </dict>
 </plist>

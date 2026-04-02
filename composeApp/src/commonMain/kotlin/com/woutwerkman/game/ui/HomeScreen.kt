@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.woutwerkman.net.PeerInfo
+import com.woutwerkman.net.generateQrCodePng
 
 data class ForeignLobby(
     val lobbyId: String,
@@ -31,7 +32,6 @@ fun HomeScreen(
     lobbyPlayers: List<PeerInfo>,
     foreignLobbies: List<ForeignLobby> = emptyList(),
     webHostUrl: String? = null,
-    webHostQrBytes: ByteArray? = null,
     onSettingsClick: () -> Unit,
     onJoinPeer: (String) -> Unit,
     onEnterLobby: () -> Unit
@@ -225,22 +225,20 @@ fun HomeScreen(
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    if (webHostQrBytes != null) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        val qrBitmap = remember(webHostQrBytes) {
-                            decodeImageBitmap(webHostQrBytes)
-                        }
-                        androidx.compose.foundation.Image(
-                            bitmap = qrBitmap,
-                            contentDescription = "QR code for $webHostUrl",
-                            modifier = Modifier
-                                .size(200.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.White)
-                                .padding(8.dp),
-                            filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
-                        )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    val qrBitmap = remember(webHostUrl) {
+                        decodeImageBitmap(generateQrCodePng(webHostUrl))
                     }
+                    androidx.compose.foundation.Image(
+                        bitmap = qrBitmap,
+                        contentDescription = "QR code for $webHostUrl",
+                        modifier = Modifier
+                            .size(200.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White)
+                            .padding(8.dp),
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
                     Card(
                         colors = CardDefaults.cardColors(

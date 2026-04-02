@@ -74,13 +74,9 @@ suspend fun runStructuredConnectivityTest(
  */
 fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
-    val platformsToCheck = if (requested.isEmpty()) {
+    val platformsToCheck = requested.ifEmpty {
         listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device")
-    } else {
-        requested
     }
-
-    val includeJvm = platformsToCheck.any { it.lowercase() == "jvm" }
 
     // Detect non-JVM platforms first so we know what JVM should target
     for (platform in platformsToCheck) {
@@ -204,7 +200,7 @@ fun getConnectedAndroidDevices(): List<Pair<String, TestPlatform>> {
                 val platform = if (id.startsWith("emulator-")) TestPlatform.ANDROID_SIMULATOR else TestPlatform.ANDROID_REAL_DEVICE
                 Pair(id, platform)
             }
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         emptyList()
     }
 }
@@ -224,7 +220,7 @@ fun getBootedIosSimulators(): List<Pair<String, String>> {
             }
         }
         simulators
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         emptyList()
     }
 }
@@ -248,7 +244,7 @@ fun getConnectedIosDevices(): List<Pair<String, String>> {
             }
         }
         devices
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         emptyList()
     }
 }
@@ -328,6 +324,16 @@ fun buildIosDeviceApp(udid: String) {
 
     if (process.waitFor() != 0) {
         throw IllegalStateException("Failed to build Kotlin framework for iOS device")
+    }
+
+    // The Xcode project's file reference points to iosSimulatorArm64, but we built for iosArm64.
+    // Symlink so the "Embed Frameworks" build phase finds the framework at the expected path.
+    val simFrameworkDir = java.io.File("$rootDir/composeApp/build/bin/iosSimulatorArm64/debugFramework")
+    val simFramework = java.io.File(simFrameworkDir, "ComposeApp.framework")
+    if (!simFramework.exists()) {
+        simFrameworkDir.mkdirs()
+        val deviceFramework = java.io.File("$rootDir/composeApp/build/bin/iosArm64/debugFramework/ComposeApp.framework")
+        ProcessBuilder("ln", "-s", deviceFramework.absolutePath, simFramework.absolutePath).start().waitFor()
     }
 
     // Build Xcode project - try using existing DerivedData first

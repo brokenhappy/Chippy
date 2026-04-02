@@ -1,7 +1,5 @@
 package com.woutwerkman.connectivitytest.launchers
 
-import java.io.File
-
 /**
  * Launcher for Android emulator.
  * Installs APK and launches the app with connectivity test intent.
@@ -38,7 +36,7 @@ class AndroidLauncher(
         // Clear logcat to avoid old logs
         ProcessBuilder("adb", "-s", emulatorId, "logcat", "-c").start().waitFor()
 
-        // Launch the app
+        // Launch the app in connectivity test mode
         val launchResult = ProcessBuilder(
             "adb", "-s", emulatorId, "shell",
             "am start -n com.woutwerkman/.MainActivity " +

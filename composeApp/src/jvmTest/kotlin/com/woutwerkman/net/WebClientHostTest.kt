@@ -40,7 +40,7 @@ class WebClientHostTest {
                 val body = response.body()
                 assertTrue(body.contains("<!DOCTYPE html>"), "Should serve HTML page")
                 assertTrue(body.contains("Chippy"), "HTML should contain app name")
-                assertTrue(body.contains("WebSocket"), "HTML should contain WebSocket client code")
+                assertTrue(body.contains("composeApp.js"), "HTML should load the Compose WASM app")
             }
         }
     }

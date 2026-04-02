@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -12,6 +13,12 @@ plugins {
 
 kotlin {
     jvm("jvm")
+
+    @OptIn(ExperimentalWasmDsl::class)
+    wasmJs {
+        browser()
+        binaries.executable()
+    }
 
     androidTarget {
         compilerOptions {
@@ -134,6 +141,23 @@ android {
 dependencies {
     debugImplementation(libs.compose.uiTooling)
 }
+
+// Copy wasmJs webpack output + index.html into JVM resources so host servers can serve it
+val copyWasmToJvmResources by tasks.registering(Sync::class) {
+    from(layout.buildDirectory.dir("kotlin-webpack/wasmJs/developmentExecutable"))
+    from(layout.buildDirectory.dir("processedResources/wasmJs/main")) {
+        include("index.html")
+    }
+    into(layout.buildDirectory.dir("generated/wasmWebClient"))
+    dependsOn("wasmJsBrowserDevelopmentWebpack", "wasmJsProcessResources")
+}
+
+// Wire the copied WASM files into JVM resource processing
+tasks.named("jvmProcessResources") { dependsOn(copyWasmToJvmResources) }
+
+kotlin.sourceSets.getByName("jvmMain").resources.srcDir(
+    copyWasmToJvmResources.map { it.destinationDir }
+)
 
 compose.desktop {
     application {

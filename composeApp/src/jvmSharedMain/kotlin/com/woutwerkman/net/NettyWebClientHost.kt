@@ -41,11 +41,15 @@ internal suspend fun <T> nettyHostingWebClient(
     val appModule: Application.() -> Unit = {
         install(io.ktor.server.websocket.WebSockets)
         routing {
-            get("/") {
-                call.respondText(WEB_CLIENT_HTML, ContentType.Text.Html)
-            }
             webSocket("/ws") {
                 handleWebSocketSession(connection, json)
+            }
+            get("/") {
+                serveWasmResource(call, "index.html")
+            }
+            get("/{path...}") {
+                val path = call.parameters.getAll("path")?.joinToString("/") ?: ""
+                serveWasmResource(call, path)
             }
         }
     }
@@ -122,6 +126,22 @@ private suspend fun DefaultWebSocketServerSession.handleWebSocketSession(
             println("[WebHost] Web client $virtualId disconnected")
         }
     }
+}
+
+private suspend fun serveWasmResource(call: ApplicationCall, path: String) {
+    val resource = Thread.currentThread().contextClassLoader.getResource(path)
+    if (resource == null) {
+        call.respondText("Not Found", ContentType.Text.Plain, HttpStatusCode.NotFound)
+        return
+    }
+    val contentType = when {
+        path.endsWith(".html") -> ContentType.Text.Html
+        path.endsWith(".js") -> ContentType("application", "javascript")
+        path.endsWith(".wasm") -> ContentType("application", "wasm")
+        path.endsWith(".css") -> ContentType.Text.CSS
+        else -> ContentType.Application.OctetStream
+    }
+    call.respondBytes(resource.readBytes(), contentType)
 }
 
 private fun getLocalIpAddress(): String {

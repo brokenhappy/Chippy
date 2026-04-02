@@ -20,6 +20,7 @@ internal suspend fun <T> nativeHostingWebClient(
 ): T = coroutineScope {
     val json = Json { ignoreUnknownKeys = true }
     val localIp = getLocalIpAddress()
+    val resources = loadWebClientResources()
 
     val serverFd = createListeningSocket()
     val port = getSocketPort(serverFd)
@@ -28,7 +29,7 @@ internal suspend fun <T> nativeHostingWebClient(
     NSLog("[WebHost-iOS] Serving at $url")
 
     launch(Dispatchers.Default) {
-        acceptLoop(serverFd, connection, json)
+        acceptLoop(serverFd, connection, json, resources)
     }
 
     try {
@@ -43,6 +44,7 @@ private suspend fun acceptLoop(
     serverFd: Int,
     connection: PeerNetConnection,
     json: Json,
+    resources: WebClientResources,
 ): Unit = coroutineScope {
     while (isActive) {
         val clientFd = memScoped {
@@ -53,11 +55,16 @@ private suspend fun acceptLoop(
         }
         if (clientFd < 0) break
         NSLog("[WebHost-iOS] Accepted connection (fd=$clientFd)")
-        launch { handleConnection(clientFd, connection, json) }
+        launch { handleConnection(clientFd, connection, json, resources) }
     }
 }
 
-private suspend fun handleConnection(fd: Int, connection: PeerNetConnection, json: Json) {
+private suspend fun handleConnection(
+    fd: Int,
+    connection: PeerNetConnection,
+    json: Json,
+    resources: WebClientResources,
+) {
     try {
         val requestBytes = posixReadAvailable(fd) ?: return
         val request = requestBytes.decodeToString()
@@ -68,12 +75,14 @@ private suspend fun handleConnection(fd: Int, connection: PeerNetConnection, jso
             path == "/ws" && request.contains("Upgrade: websocket", ignoreCase = true) -> {
                 handleWebSocketUpgrade(fd, request, connection, json)
             }
-            path == "/" -> {
-                sendHttpResponse(fd, 200, "text/html", WEB_CLIENT_HTML)
-                close(fd)
-            }
             else -> {
-                sendHttpResponse(fd, 404, "text/plain", "Not Found")
+                val filePath = if (path == "/") "index.html" else path.trimStart('/')
+                val body = resources.get(filePath)
+                if (body != null) {
+                    sendHttpResponse(fd, 200, resources.contentType(filePath), body)
+                } else {
+                    sendHttpResponse(fd, 404, "text/plain", "Not Found".encodeToByteArray())
+                }
                 close(fd)
             }
         }
@@ -83,19 +92,18 @@ private suspend fun handleConnection(fd: Int, connection: PeerNetConnection, jso
     }
 }
 
-private fun sendHttpResponse(fd: Int, status: Int, contentType: String, body: String) {
+private fun sendHttpResponse(fd: Int, status: Int, contentType: String, body: ByteArray) {
     val statusText = when (status) {
         200 -> "OK"
         404 -> "Not Found"
         else -> "Error"
     }
-    val bodyBytes = body.encodeToByteArray()
     val header = "HTTP/1.1 $status $statusText\r\n" +
-            "Content-Type: $contentType; charset=utf-8\r\n" +
-            "Content-Length: ${bodyBytes.size}\r\n" +
+            "Content-Type: $contentType\r\n" +
+            "Content-Length: ${body.size}\r\n" +
             "Connection: close\r\n" +
             "\r\n"
-    posixSendAll(fd, header.encodeToByteArray() + bodyBytes)
+    posixSendAll(fd, header.encodeToByteArray() + body)
 }
 
 // ---- WebSocket ----

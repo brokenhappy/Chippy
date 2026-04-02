@@ -142,22 +142,55 @@ dependencies {
     debugImplementation(libs.compose.uiTooling)
 }
 
-// Copy wasmJs webpack output + index.html into JVM resources so host servers can serve it
-val copyWasmToJvmResources by tasks.registering(Sync::class) {
+// Copy wasmJs webpack output so host servers can serve the Compose web client.
+// Includes a manifest listing all files so the server can pre-load them.
+val copyWasmWebClient by tasks.registering(Sync::class) {
     from(layout.buildDirectory.dir("kotlin-webpack/wasmJs/developmentExecutable"))
     from(layout.buildDirectory.dir("processedResources/wasmJs/main")) {
         include("index.html")
     }
     into(layout.buildDirectory.dir("generated/wasmWebClient"))
     dependsOn("wasmJsBrowserDevelopmentWebpack", "wasmJsProcessResources")
+    doLast {
+        val dir = destinationDir
+        val names = dir.listFiles()
+            ?.filter { it.isFile && it.name != "manifest.txt" }
+            ?.map { it.name }
+            ?.sorted()
+            ?: emptyList()
+        File(dir, "manifest.txt").writeText(names.joinToString("\n"))
+    }
 }
 
-// Wire the copied WASM files into JVM resource processing
-tasks.named("jvmProcessResources") { dependsOn(copyWasmToJvmResources) }
-
+// JVM/Android: wire as classpath resources
+tasks.named("jvmProcessResources") { dependsOn(copyWasmWebClient) }
 kotlin.sourceSets.getByName("jvmMain").resources.srcDir(
-    copyWasmToJvmResources.map { it.destinationDir }
+    copyWasmWebClient.map { it.destinationDir }
 )
+
+// iOS: copy WASM web client into the app bundle during the Xcode build.
+// Registered as a standalone task to avoid capturing script references
+// in embedAndSignAppleFrameworkForXcode (which would break configuration cache).
+tasks.register("copyWasmToAppBundle") {
+    dependsOn("copyWasmWebClient")
+    val srcDir = layout.buildDirectory.dir("generated/wasmWebClient")
+    val targetBuildDir = providers.environmentVariable("TARGET_BUILD_DIR")
+    val fullProductName = providers.environmentVariable("FULL_PRODUCT_NAME")
+    inputs.dir(srcDir)
+    onlyIf { targetBuildDir.isPresent && fullProductName.isPresent }
+    doLast {
+        val src = srcDir.get().asFile
+        val dst = File("${targetBuildDir.get()}/${fullProductName.get()}/wasmWebClient")
+        if (src.exists()) {
+            src.copyRecursively(dst, overwrite = true)
+        }
+    }
+}
+tasks.configureEach {
+    if (name == "embedAndSignAppleFrameworkForXcode") {
+        dependsOn("copyWasmToAppBundle")
+    }
+}
 
 compose.desktop {
     application {

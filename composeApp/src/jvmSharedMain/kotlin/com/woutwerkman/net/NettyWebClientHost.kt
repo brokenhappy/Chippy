@@ -28,6 +28,7 @@ internal suspend fun <T> nettyHostingWebClient(
 ): T = coroutineScope {
     val json = Json { ignoreUnknownKeys = true }
     val localIp = getLocalIpAddress()
+    val resources = loadWebClientResources()
 
     val keyStorePassword = "chippy-web"
     val keyStore = buildKeyStore {
@@ -45,11 +46,11 @@ internal suspend fun <T> nettyHostingWebClient(
                 handleWebSocketSession(connection, json)
             }
             get("/") {
-                serveWasmResource(call, "index.html")
+                serveResource(call, resources, "index.html")
             }
             get("/{path...}") {
                 val path = call.parameters.getAll("path")?.joinToString("/") ?: ""
-                serveWasmResource(call, path)
+                serveResource(call, resources, path)
             }
         }
     }
@@ -128,20 +129,13 @@ private suspend fun DefaultWebSocketServerSession.handleWebSocketSession(
     }
 }
 
-private suspend fun serveWasmResource(call: ApplicationCall, path: String) {
-    val resource = Thread.currentThread().contextClassLoader.getResource(path)
-    if (resource == null) {
+private suspend fun serveResource(call: ApplicationCall, resources: WebClientResources, path: String) {
+    val bytes = resources.get(path)
+    if (bytes == null) {
         call.respondText("Not Found", ContentType.Text.Plain, HttpStatusCode.NotFound)
         return
     }
-    val contentType = when {
-        path.endsWith(".html") -> ContentType.Text.Html
-        path.endsWith(".js") -> ContentType("application", "javascript")
-        path.endsWith(".wasm") -> ContentType("application", "wasm")
-        path.endsWith(".css") -> ContentType.Text.CSS
-        else -> ContentType.Application.OctetStream
-    }
-    call.respondBytes(resource.readBytes(), contentType)
+    call.respondBytes(bytes, ContentType.parse(resources.contentType(path)))
 }
 
 private fun getLocalIpAddress(): String {

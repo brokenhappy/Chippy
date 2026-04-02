@@ -27,8 +27,7 @@ internal suspend fun <T> nativeHostingWebClient(
     NSLog("[WebHost-iOS] TCP server listening on port $port (fd=$serverFd)")
     NSLog("[WebHost-iOS] Serving at $url")
 
-    // Accept loop as a child coroutine — cancelled when scope exits
-    launch {
+    launch(Dispatchers.Default) {
         acceptLoop(serverFd, connection, json)
     }
 

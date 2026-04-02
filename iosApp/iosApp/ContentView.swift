@@ -11,11 +11,25 @@ struct ComposeView: UIViewControllerRepresentable {
 }
 
 struct ContentView: View {
+    @State private var showCompose = false
+
     var body: some View {
-        ComposeView()
-            .ignoresSafeArea()
+        ZStack {
+            // Match Material3 default background so the transition is seamless
+            Color(red: 0.99, green: 0.96, blue: 0.99)
+                .ignoresSafeArea()
+
+            if showCompose {
+                ComposeView()
+                    .ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            // Defer Compose initialization to the next run loop iteration
+            // so the background color renders first instead of a black screen.
+            DispatchQueue.main.async {
+                showCompose = true
+            }
+        }
     }
 }
-
-
-

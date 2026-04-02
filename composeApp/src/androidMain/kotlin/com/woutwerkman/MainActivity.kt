@@ -7,11 +7,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.lifecycle.lifecycleScope
 import com.woutwerkman.net.*
-import kotlinx.coroutines.*
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    private var testScope: CoroutineScope? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -33,8 +33,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun runAndroidConnectivityTest(instanceId: String, platformsStr: String) {
-        testScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
         val targetPlatforms = platformsStr.split(",")
             .mapNotNull { TestPlatform.fromString(it) }
             .toSet()
@@ -44,7 +42,7 @@ class MainActivity : ComponentActivity() {
             targetPlatforms = targetPlatforms
         )
 
-        testScope?.launch {
+        lifecycleScope.launch {
             val result = runConnectivityTest(config)
             when (result) {
                 is ConnectivityTestResult.Success -> {
@@ -58,11 +56,6 @@ class MainActivity : ComponentActivity() {
             }
             finish()
         }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        testScope?.cancel()
     }
 }
 

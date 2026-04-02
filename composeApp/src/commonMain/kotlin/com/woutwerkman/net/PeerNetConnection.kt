@@ -13,7 +13,13 @@ data class PeerInfo(
     val id: String,
     val name: String,
     val address: String,
-    val port: Int
+    val port: Int,
+    /** Port of the device's web client host server, or 0 if not hosting. */
+    val webPort: Int = 0,
+    /** Whether the web server uses TLS (HTTPS/WSS). */
+    val webSecure: Boolean = false,
+    /** Platform identifier (e.g. "Java 17", "Android 34"). */
+    val platform: String = "",
 )
 
 /**
@@ -100,6 +106,12 @@ class RawPeerNetConnection(
     val localPeerId: String,
     val incoming: ReceiveChannel<RawPeerMessage>,
     val outgoing: SendChannel<PeerCommand>,
+    /**
+     * Directly broadcasts a payload to all known peers, bypassing the [outgoing] channel.
+     * Used for best-effort shutdown messages when the channel-processing coroutine is cancelled.
+     * This is a non-suspending, synchronous call.
+     */
+    val broadcastDirect: (ByteArray) -> Unit = {},
 )
 
 /**

@@ -28,7 +28,7 @@ class InMemoryPeerNetTest {
         val peerB = net.addPeer("B", "Bob")
         val peerC = net.addPeer("C", "Charlie")
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
         peerA.outgoing.send(PeerCommand.SendTo("B", "hello".encodeToByteArray()))
         advanceUntilIdle()
 
@@ -37,7 +37,6 @@ class InMemoryPeerNetTest {
         assertEquals("hello", msg.payload.decodeToString())
         assertTrue(peerC.incoming.tryReceive().isFailure, "C should not receive A→B message")
 
-        router.cancel()
         net.close()
     }
 
@@ -49,13 +48,12 @@ class InMemoryPeerNetTest {
         val peerC = net.addPeer("C", "Charlie")
         net.link("A", "B") // A↔B only, no A↔C
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
         peerA.outgoing.send(PeerCommand.SendTo("C", "hello".encodeToByteArray()))
         advanceUntilIdle()
 
         assertTrue(peerC.incoming.tryReceive().isFailure, "Unreachable peer should not receive message")
 
-        router.cancel()
         net.close()
     }
 
@@ -66,7 +64,7 @@ class InMemoryPeerNetTest {
         val peerB = net.addPeer("B", "Bob")
         val peerC = net.addPeer("C", "Charlie")
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
         peerA.outgoing.send(PeerCommand.Broadcast("hello".encodeToByteArray()))
         advanceUntilIdle()
 
@@ -76,7 +74,6 @@ class InMemoryPeerNetTest {
         assertEquals("hello", msgC.payload.decodeToString())
         assertTrue(peerA.incoming.tryReceive().isFailure, "Sender should not receive own broadcast")
 
-        router.cancel()
         net.close()
     }
 
@@ -89,7 +86,7 @@ class InMemoryPeerNetTest {
         net.link("A", "B")
         net.link("B", "C")
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
         peerA.outgoing.send(PeerCommand.Broadcast("hello".encodeToByteArray()))
         advanceUntilIdle()
 
@@ -97,7 +94,6 @@ class InMemoryPeerNetTest {
         assertEquals("hello", msgB.payload.decodeToString())
         assertTrue(peerC.incoming.tryReceive().isFailure, "C should not get A's broadcast (no direct link)")
 
-        router.cancel()
         net.close()
     }
 
@@ -183,7 +179,7 @@ class InMemoryPeerNetTest {
         peerA.incoming.receive()
         peerB.incoming.receive()
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
 
         // Verify message works before unlink
         peerA.outgoing.send(PeerCommand.SendTo("B", "before".encodeToByteArray()))
@@ -201,7 +197,6 @@ class InMemoryPeerNetTest {
         advanceUntilIdle()
         assertTrue(peerB.incoming.tryReceive().isFailure, "Message after unlink should be dropped")
 
-        router.cancel()
         net.close()
     }
 
@@ -220,7 +215,7 @@ class InMemoryPeerNetTest {
         peerA.incoming.receive()
         peerB.incoming.receive()
 
-        val router = net.startRouting(this)
+        backgroundScope.launch { net.runRouting() }
 
         peerA.outgoing.send(PeerCommand.SendTo("peer-b", "data".encodeToByteArray()))
         advanceUntilIdle()
@@ -229,7 +224,6 @@ class InMemoryPeerNetTest {
         assertEquals("peer-a", msg.fromPeerId)
         assertEquals("data", msg.payload.decodeToString())
 
-        router.cancel()
         net.close()
     }
 }

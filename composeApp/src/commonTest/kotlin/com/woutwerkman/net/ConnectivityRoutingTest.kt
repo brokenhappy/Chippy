@@ -60,7 +60,7 @@ class ConnectivityRoutingTest {
         setup: PeerSetup,
         clock: Clock,
     ): Job = launch {
-        setup.net.startRouting(this)
+        launch { setup.net.runRouting() }
         for ((id, peer) in setup.peers) {
             val ch = setup.channels[id]!!
             val st = setup.states[id]!!

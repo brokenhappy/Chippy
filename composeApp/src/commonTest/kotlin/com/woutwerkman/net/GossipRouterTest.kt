@@ -189,7 +189,7 @@ class GossipRouterTest {
         val stateB = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }
@@ -242,7 +242,7 @@ class GossipRouterTest {
         val stateB = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { withEventLinearizer(channelB, clock) { s -> launch { s.collect { stateB.value = it } }; awaitCancellation() } }
@@ -285,7 +285,7 @@ class GossipRouterTest {
         val stateB = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }
         }
@@ -419,7 +419,7 @@ class GossipRouterTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { gossipRouter(peerC.raw, channelC, localC, "Charlie", clock) }
@@ -502,7 +502,7 @@ class GossipRouterTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, Channel(Channel.BUFFERED), "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, Channel(Channel.BUFFERED), "Bob", clock) }
             launch { gossipRouter(peerC.raw, channelC, Channel(Channel.BUFFERED), "Charlie", clock) }
@@ -547,7 +547,7 @@ class GossipRouterTest {
         val stateA = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }
@@ -594,7 +594,7 @@ class GossipRouterTest {
         val stateB = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }

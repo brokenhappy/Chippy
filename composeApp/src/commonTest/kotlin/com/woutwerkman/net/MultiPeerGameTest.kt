@@ -61,7 +61,7 @@ class MultiPeerGameTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { gossipRouter(peerC.raw, channelC, localC, "Charlie", clock) }
@@ -165,7 +165,7 @@ class MultiPeerGameTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, localA, "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, localB, "Bob", clock) }
             launch { gossipRouter(peerC.raw, channelC, localC, "Charlie", clock) }

@@ -2,7 +2,9 @@ package com.woutwerkman.net
 
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import platform.Foundation.NSLog
@@ -21,6 +23,7 @@ internal suspend fun <T> nativeHostingWebClient(
     val json = Json { ignoreUnknownKeys = true }
     val localIp = getLocalIpAddress()
     val resources = loadWebClientResources()
+    val activeWebClients = mutableSetOf<String>()
 
     val serverFd = createListeningSocket()
     val port = getSocketPort(serverFd)
@@ -29,13 +32,24 @@ internal suspend fun <T> nativeHostingWebClient(
     NSLog("[WebHost-iOS] Serving at $url")
 
     launch(Dispatchers.Default) {
-        acceptLoop(serverFd, connection, json, resources)
+        acceptLoop(serverFd, connection, json, resources, activeWebClients)
     }
 
     try {
         block(url)
     } finally {
         close(serverFd)
+        for (virtualId in activeWebClients) {
+            try {
+                connection.submitEvent(PeerEvent.Left(virtualId))
+            } catch (_: Exception) { }
+        }
+        @Suppress("UNCHECKED_CAST")
+        (connection.state as? MutableStateFlow<PeerNetState>)?.update { state ->
+            activeWebClients.fold(state) { s, id ->
+                if (s.discoveredPeers.containsKey(id)) s.after(PeerEvent.Left(id)).first else s
+            }
+        }
     }
 }
 
@@ -45,6 +59,7 @@ private suspend fun acceptLoop(
     connection: PeerNetConnection,
     json: Json,
     resources: WebClientResources,
+    activeWebClients: MutableSet<String>,
 ): Unit = coroutineScope {
     while (isActive) {
         val clientFd = memScoped {
@@ -55,7 +70,7 @@ private suspend fun acceptLoop(
         }
         if (clientFd < 0) break
         NSLog("[WebHost-iOS] Accepted connection (fd=$clientFd)")
-        launch { handleConnection(clientFd, connection, json, resources) }
+        launch { handleConnection(clientFd, connection, json, resources, activeWebClients) }
     }
 }
 
@@ -64,6 +79,7 @@ private suspend fun handleConnection(
     connection: PeerNetConnection,
     json: Json,
     resources: WebClientResources,
+    activeWebClients: MutableSet<String>,
 ) {
     try {
         val requestBytes = posixReadAvailable(fd) ?: return
@@ -73,7 +89,7 @@ private suspend fun handleConnection(
 
         when {
             path == "/ws" && request.contains("Upgrade: websocket", ignoreCase = true) -> {
-                handleWebSocketUpgrade(fd, request, connection, json)
+                handleWebSocketUpgrade(fd, request, connection, json, activeWebClients)
             }
             else -> {
                 val filePath = if (path == "/") "index.html" else path.trimStart('/')
@@ -113,6 +129,7 @@ private suspend fun handleWebSocketUpgrade(
     request: String,
     connection: PeerNetConnection,
     json: Json,
+    activeWebClients: MutableSet<String>,
 ) {
     val key = extractHeader(request, "Sec-WebSocket-Key")
     if (key == null) {
@@ -128,19 +145,43 @@ private suspend fun handleWebSocketUpgrade(
             "\r\n"
     posixSendAll(fd, response.encodeToByteArray())
 
-    val sessionId = randomHex(8)
-    val virtualId = "web-${connection.localId}-$sessionId"
-    handleWebSocketSession(fd, virtualId, connection, json)
+    handleWebSocketSession(fd, connection, json, activeWebClients)
 }
 
 private suspend fun handleWebSocketSession(
     fd: Int,
-    virtualId: String,
     connection: PeerNetConnection,
     json: Json,
+    activeWebClients: MutableSet<String>,
 ) {
+    // Client-first handshake: read Hello or Reconnect to determine session identity.
+    val firstFrame = readWebSocketFrame(fd)
+    val handshake = if (firstFrame != null && firstFrame.opcode == 0x01) {
+        try { json.decodeFromString<WsMessage>(firstFrame.payload.decodeToString()) }
+        catch (_: Exception) { null }
+    } else null
+
+    val virtualId: String
+    val playerName: String
+    when (handshake) {
+        is WsMessage.Reconnect -> {
+            virtualId = handshake.localId
+            playerName = handshake.playerName
+        }
+        is WsMessage.Hello -> {
+            virtualId = "web-${connection.localId}-${randomHex(8)}"
+            playerName = handshake.playerName
+        }
+        else -> {
+            virtualId = "web-${connection.localId}-${randomHex(8)}"
+            playerName = "Web Player"
+        }
+    }
+
+    activeWebClients.add(virtualId)
+
     connection.submitEvent(
-        PeerEvent.Joined(PeerInfo(id = virtualId, name = "Web Player", address = "", port = 0))
+        PeerEvent.Joined(PeerInfo(id = virtualId, name = playerName, address = "", port = 0))
     )
 
     val identityMsg = json.encodeToString<WsMessage>(
@@ -173,13 +214,16 @@ private suspend fun handleWebSocketSession(
                     } catch (_: Exception) { continue }
                     when (msg) {
                         is WsMessage.EventSubmission -> connection.submitEvent(msg.event)
-                        is WsMessage.Reconnect -> { /* TODO Phase 2 */ }
                         else -> {}
                     }
                 }
             }
         } finally {
-            connection.submitEvent(PeerEvent.Left(virtualId))
+            try {
+                connection.submitEvent(PeerEvent.Left(virtualId))
+            } catch (_: Exception) {
+                // Scope may be cancelled; cleanup handled by nativeHostingWebClient's finally
+            }
             close(fd)
             NSLog("[WebHost-iOS] Web client $virtualId disconnected")
         }

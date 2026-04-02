@@ -24,27 +24,25 @@ private const val HANDSHAKE_ACK = "${HANDSHAKE_PREFIX}ACK|"
 internal actual suspend fun <T> withRawPeerNetConnectionImpl(
     config: PeerNetConfig,
     block: suspend CoroutineScope.(RawPeerNetConnection) -> T
-): T = coroutineScope {
+): T {
     val peerId = generatePeerId()
     val incoming = Channel<RawPeerMessage>(Channel.BUFFERED)
     val outgoing = Channel<PeerCommand>(Channel.BUFFERED)
 
-    val transport = AndroidPeerTransport(
+    return withAndroidPeerTransport(
         peerId = peerId,
         peerName = config.displayName,
         serviceName = config.serviceName,
         incomingChannel = incoming,
-        outgoingChannel = outgoing
-    )
-
-    try {
-        transport.start(this)
-        val connection = RawPeerNetConnection(peerId, incoming, outgoing)
-        block(connection)
-    } finally {
-        transport.stop()
-        incoming.close()
-        outgoing.close()
+        outgoingChannel = outgoing,
+    ) { broadcastFn ->
+        val connection = RawPeerNetConnection(peerId, incoming, outgoing, broadcastFn)
+        try {
+            block(connection)
+        } finally {
+            incoming.close()
+            outgoing.close()
+        }
     }
 }
 
@@ -66,314 +64,411 @@ private data class PeerState(
     var isJoined: Boolean = false
 )
 
-private class AndroidPeerTransport(
-    private val peerId: String,
-    private val peerName: String,
-    private val serviceName: String,
-    private val incomingChannel: SendChannel<RawPeerMessage>,
-    private val outgoingChannel: ReceiveChannel<PeerCommand>
-) {
-    private var jmdns: JmDNS? = null
-    private var serviceInfo: ServiceInfo? = null
-    private var udpSocket: DatagramSocket? = null
-    private var isRunning = false
-    private val peerStates = ConcurrentHashMap<String, PeerState>()
-    private val serviceType = "_${serviceName}._udp.local."
-    private var localAddress: String = "0.0.0.0"
-    private var localPort: Int = 0
-    private var scope: CoroutineScope? = null
+/**
+ * Events from discovery callbacks (JmDNS), bridged into the coroutine world.
+ */
+private sealed class DiscoveryEvent {
+    data class PeerDiscovered(val serviceName: String) : DiscoveryEvent()
+    data class PeerRemoved(val serviceName: String) : DiscoveryEvent()
+    data class PeerJoined(val state: PeerState) : DiscoveryEvent()
+    data class EmulatorProbe(val address: String, val port: Int, val helloPayload: String) : DiscoveryEvent()
+}
 
-    fun start(scope: CoroutineScope) {
-        this.scope = scope
-        isRunning = true
+/**
+ * Resource function that sets up the Android peer transport, runs [block] with a
+ * broadcastDirect function, and tears down all resources when [block] completes.
+ */
+private suspend fun <T> withAndroidPeerTransport(
+    peerId: String,
+    peerName: String,
+    serviceName: String,
+    incomingChannel: SendChannel<RawPeerMessage>,
+    outgoingChannel: ReceiveChannel<PeerCommand>,
+    block: suspend CoroutineScope.((ByteArray) -> Unit) -> T,
+): T {
+    val serviceType = "_${serviceName}._udp.local."
+    val peerStates = ConcurrentHashMap<String, PeerState>()
+    val discoveryEvents = Channel<DiscoveryEvent>(Channel.BUFFERED)
 
-        scope.launch(Dispatchers.IO) {
-            try {
-                localAddress = getLocalIpAddress()
-                println("[PeerNet-$peerId] Local IP: $localAddress")
+    val localAddress = getLocalIpAddress()
+    println("[PeerNet-$peerId] Local IP: $localAddress")
 
-                // Start UDP socket for messaging - try MESSAGE_PORT first for emulator adb reverse compatibility
-                udpSocket = try {
-                    DatagramSocket(MESSAGE_PORT).apply {
-                        reuseAddress = true
-                        broadcast = true
-                        soTimeout = 100
-                    }
-                } catch (e: Exception) {
-                    println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
-                    DatagramSocket(0).apply {
-                        reuseAddress = true
-                        broadcast = true
-                        soTimeout = 100
-                    }
-                }
-                localPort = udpSocket!!.localPort
-                println("[PeerNet-$peerId] Bound to port $localPort")
+    val udpSocket = createUdpSocket(peerId)
+    val localPort = udpSocket.localPort
+    println("[PeerNet-$peerId] Bound to port $localPort")
 
-                // Start mDNS
-                startMdns(this)
-
-                // Listen for UDP messages
-                launch { listenForMessages() }
-
-                // Process outgoing commands
-                launch { processOutgoingCommands() }
-
-                // Handshake maintenance
-                launch { handshakeMaintenance() }
-
-            } catch (e: Exception) {
-                println("[PeerNet-$peerId] Error starting: ${e.message}")
-                e.printStackTrace()
-            }
+    val broadcastFn: (ByteArray) -> Unit = { payload ->
+        val message = "$peerId:${String(payload)}"
+        peerStates.values.forEach { state ->
+            sendUdp(udpSocket, state.info.address, state.info.port, message)
         }
     }
 
-    private suspend fun handshakeMaintenance() {
-        while (isRunning) {
-            delay(1.seconds)
-            
-            // Emulator-to-Host proactive discovery
-            if (localAddress == "10.0.2.15") {
-                // Try common default port as a fallback
-                sendUdp("10.0.2.2", MESSAGE_PORT, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
+    val jmdns = startJmdns(peerId, localAddress, localPort, serviceType, peerName, discoveryEvents)
+
+    try {
+        return coroutineScope {
+            // Infrastructure coroutines
+            launch(Dispatchers.IO) {
+                listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents, localAddress, localPort, peerName)
             }
-
-            peerStates.values.forEach { state ->
-                if (state.weSeeThemViaDiscovery && !state.isJoined) {
-                    sendHandshakeHello(state.info)
-                    state.weSentHello = true
-                }
+            launch {
+                processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
             }
-        }
-    }
-
-    private fun startMdns(scope: CoroutineScope) {
-        try {
-            val addr = InetAddress.getByName(localAddress)
-            jmdns = JmDNS.create(addr, "peer-android-$peerId")
-            
-            jmdns?.addServiceListener(serviceType, object : ServiceListener {
-                override fun serviceAdded(event: ServiceEvent) {
-                    jmdns?.requestServiceInfo(event.type, event.name, true)
-                }
-
-                override fun serviceRemoved(event: ServiceEvent) {
-                    handlePeerRemoved(event.name)
-                }
-
-                override fun serviceResolved(event: ServiceEvent) {
-                    handlePeerDiscovered(event.name)
-                }
-            })
-
-            val fullServiceName = "$peerName|$peerId|$localAddress|$localPort"
-            serviceInfo = ServiceInfo.create(serviceType, fullServiceName, localPort, "PeerNet")
-            jmdns?.registerService(serviceInfo)
-            println("[PeerNet-$peerId] mDNS service registered: $fullServiceName")
-
-            // Fallback query
-            scope.launch {
-                while (isRunning) {
+            launch {
+                handshakeMaintenance(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
+            }
+            launch {
+                processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, peerName, localAddress, localPort, udpSocket)
+            }
+            // mDNS fallback polling
+            launch {
+                // Cancellable: delay is a suspension point
+                while (true) {
                     delay(5.seconds)
                     try {
-                        val services = jmdns?.list(serviceType)
-                        services?.forEach { handlePeerDiscovered(it.name) }
-                    } catch (e: Exception) {}
+                        val services = jmdns.list(serviceType)
+                        services?.forEach {
+                            discoveryEvents.trySend(DiscoveryEvent.PeerDiscovered(it.name))
+                        }
+                    } catch (_: Exception) {}
                 }
             }
-        } catch (e: Exception) {
-            println("[PeerNet-$peerId] Error starting mDNS: ${e.message}")
-        }
-    }
 
-    private fun handlePeerDiscovered(serviceName: String) {
-        val parts = serviceName.split("|")
-        if (parts.size >= 3) {
-            val pName = parts[0]
-            val pId = parts[1]
-            val pAddr = parts[2]
-            val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
-
-            if (pId == peerId) return
-
-            val peerInfo = PeerInfo(id = pId, name = pName, address = pAddr, port = pPort)
-            peerStates.compute(pId) { _, existing ->
-                if (existing == null) {
-                    println("[PeerNet-$peerId] Peer discovered: $pName ($pId)")
-                    PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
-                } else {
-                    existing.weSeeThemViaDiscovery = true
-                    existing
-                }
-            }
-            sendHandshakeHello(peerInfo)
-        }
-    }
-
-    private fun handlePeerRemoved(serviceName: String) {
-        val parts = serviceName.split("|")
-        if (parts.size >= 2) {
-            val pId = parts[1]
-            val state = peerStates.remove(pId)
-            if (state?.isJoined == true) {
-                scope?.launch {
-                    incomingChannel.send(RawPeerMessage.Event.Disconnected(pId))
-                }
-            }
-        }
-    }
-
-    private suspend fun listenForMessages() {
-        val buffer = ByteArray(65535)
-        while (isRunning && udpSocket != null) {
             try {
-                val packet = DatagramPacket(buffer, buffer.size)
-                withContext(Dispatchers.IO) { udpSocket?.receive(packet) }
-                val data = packet.data.copyOf(packet.length)
-                val message = String(data, Charsets.UTF_8)
-                val separatorIndex = message.indexOf(':')
-                if (separatorIndex > 0) {
-                    val fromPeerId = message.substring(0, separatorIndex)
-                    if (fromPeerId == peerId) continue
-                    val payload = message.substring(separatorIndex + 1)
-                    when {
-                        payload.startsWith(HANDSHAKE_HELLO) -> handleHelloReceived(fromPeerId, payload, packet.address.hostAddress ?: "", packet.port)
-                        payload.startsWith(HANDSHAKE_ACK) -> handleAckReceived(fromPeerId)
-                        else -> {
-                            // Forward if we've seen this peer at all (don't require full
-                            // handshake, as linearization state may arrive before handshake completes)
-                            val state = peerStates[fromPeerId]
-                            if (state != null) {
-                                incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
-                            }
+                coroutineScope { block(broadcastFn) }
+            } finally {
+                coroutineContext.cancelChildren()
+            }
+        }
+    } finally {
+        withContext(NonCancellable) {
+            println("[PeerNet-$peerId] Stopping")
+            try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
+            try { udpSocket.close() } catch (_: Exception) {}
+            println("[PeerNet-$peerId] Stopped")
+        }
+    }
+}
+
+private fun createUdpSocket(peerId: String): DatagramSocket {
+    return try {
+        DatagramSocket(MESSAGE_PORT).apply {
+            reuseAddress = true
+            broadcast = true
+            soTimeout = 100
+        }
+    } catch (e: Exception) {
+        println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
+        DatagramSocket(0).apply {
+            reuseAddress = true
+            broadcast = true
+            soTimeout = 100
+        }
+    }
+}
+
+private fun startJmdns(
+    peerId: String,
+    localAddress: String,
+    localPort: Int,
+    serviceType: String,
+    peerName: String,
+    discoveryEvents: SendChannel<DiscoveryEvent>,
+): JmDNS {
+    val addr = InetAddress.getByName(localAddress)
+    val jmdns = JmDNS.create(addr, "peer-android-$peerId")
+
+    jmdns.addServiceListener(serviceType, object : ServiceListener {
+        override fun serviceAdded(event: ServiceEvent) {
+            jmdns.requestServiceInfo(event.type, event.name, true)
+        }
+
+        override fun serviceRemoved(event: ServiceEvent) {
+            discoveryEvents.trySend(DiscoveryEvent.PeerRemoved(event.name))
+        }
+
+        override fun serviceResolved(event: ServiceEvent) {
+            discoveryEvents.trySend(DiscoveryEvent.PeerDiscovered(event.name))
+        }
+    })
+
+    val fullServiceName = "$peerName|$peerId|$localAddress|$localPort"
+    val serviceInfo = ServiceInfo.create(serviceType, fullServiceName, localPort, "PeerNet")
+    jmdns.registerService(serviceInfo)
+    println("[PeerNet-$peerId] mDNS service registered: $fullServiceName")
+
+    return jmdns
+}
+
+private suspend fun processDiscoveryEvents(
+    events: ReceiveChannel<DiscoveryEvent>,
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    incomingChannel: SendChannel<RawPeerMessage>,
+    peerId: String,
+    peerName: String,
+    localAddress: String,
+    localPort: Int,
+    udpSocket: DatagramSocket,
+) {
+    // Cancellable: channel receive is a suspension point
+    for (event in events) {
+        when (event) {
+            is DiscoveryEvent.PeerDiscovered -> {
+                val parts = event.serviceName.split("|")
+                if (parts.size >= 3) {
+                    val pName = parts[0]
+                    val pId = parts[1]
+                    val pAddr = parts[2]
+                    val pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+                    if (pId == peerId) continue
+
+                    val peerInfo = PeerInfo(id = pId, name = pName, address = pAddr, port = pPort)
+                    peerStates.compute(pId) { _, existing ->
+                        if (existing == null) {
+                            println("[PeerNet-$peerId] Peer discovered: $pName ($pId)")
+                            PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
+                        } else {
+                            existing.weSeeThemViaDiscovery = true
+                            existing
+                        }
+                    }
+                    sendHandshakeHello(udpSocket, peerId, peerName, localAddress, localPort, peerInfo)
+                }
+            }
+            is DiscoveryEvent.PeerRemoved -> {
+                val parts = event.serviceName.split("|")
+                if (parts.size >= 2) {
+                    val pId = parts[1]
+                    val state = peerStates.remove(pId)
+                    if (state?.isJoined == true) {
+                        incomingChannel.send(RawPeerMessage.Event.Disconnected(pId))
+                    }
+                }
+            }
+            is DiscoveryEvent.PeerJoined -> {
+                val state = event.state
+                if (!state.isJoined) {
+                    state.isJoined = true
+                    println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
+                    incomingChannel.send(RawPeerMessage.Event.Connected(state.info))
+                }
+            }
+            is DiscoveryEvent.EmulatorProbe -> {
+                delay(500.milliseconds)
+                sendUdp(udpSocket, event.address, event.port, event.helloPayload)
+            }
+        }
+    }
+}
+
+private suspend fun handshakeMaintenance(
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    peerId: String,
+    peerName: String,
+    localAddress: String,
+    localPort: Int,
+    udpSocket: DatagramSocket,
+) {
+    // Cancellable: delay is a suspension point
+    while (true) {
+        delay(1.seconds)
+
+        // Emulator-to-Host proactive discovery
+        if (localAddress == "10.0.2.15") {
+            sendUdp(udpSocket, "10.0.2.2", MESSAGE_PORT, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
+        }
+
+        peerStates.values.forEach { state ->
+            if (state.weSeeThemViaDiscovery && !state.isJoined) {
+                sendHandshakeHello(udpSocket, peerId, peerName, localAddress, localPort, state.info)
+                state.weSentHello = true
+            }
+        }
+    }
+}
+
+private suspend fun listenForMessages(
+    udpSocket: DatagramSocket,
+    peerId: String,
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    incomingChannel: SendChannel<RawPeerMessage>,
+    discoveryEvents: SendChannel<DiscoveryEvent>,
+    localAddress: String,
+    localPort: Int,
+    peerName: String,
+) {
+    val buffer = ByteArray(65535)
+    // Cancellable: withContext is a suspension point that checks for cancellation
+    while (true) {
+        try {
+            val packet = DatagramPacket(buffer, buffer.size)
+            withContext(Dispatchers.IO) { udpSocket.receive(packet) }
+            val data = packet.data.copyOf(packet.length)
+            val message = String(data, Charsets.UTF_8)
+            val separatorIndex = message.indexOf(':')
+            if (separatorIndex > 0) {
+                val fromPeerId = message.substring(0, separatorIndex)
+                if (fromPeerId == peerId) continue
+                val payload = message.substring(separatorIndex + 1)
+                when {
+                    payload.startsWith(HANDSHAKE_HELLO) -> {
+                        handleHelloReceived(
+                            fromPeerId, payload, packet.address.hostAddress ?: "", packet.port,
+                            peerId, peerStates, discoveryEvents, udpSocket, localAddress, localPort, peerName,
+                        )
+                    }
+                    payload.startsWith(HANDSHAKE_ACK) -> {
+                        handleAckReceived(fromPeerId, peerStates, discoveryEvents)
+                    }
+                    else -> {
+                        val state = peerStates[fromPeerId]
+                        if (state != null) {
+                            incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.toByteArray(Charsets.UTF_8)))
                         }
                     }
                 }
-            } catch (e: SocketTimeoutException) {
-            } catch (e: Exception) {
-                if (isRunning) println("[PeerNet-$peerId] Receive error: ${e.message}")
             }
-        }
-    }
-
-    private fun handleHelloReceived(fromPeerId: String, payload: String, fromAddress: String, fromPort: Int) {
-        val helloData = payload.removePrefix(HANDSHAKE_HELLO)
-        val parts = helloData.split("|")
-        val pName = parts.getOrNull(0) ?: "Unknown"
-        var pAddr = parts.getOrNull(2) ?: fromAddress
-        var pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
-
-        // Emulator logic:
-        // 1. If we receive a HELLO with 10.0.2.15, it's from another emulator or ourselves (translated).
-        //    Use fromAddress and fromPort which are the correct return path through the NAT.
-        if (pAddr == "10.0.2.15") {
-            pAddr = fromAddress
-            pPort = fromPort
-        }
-        
-        // 2. If we are an emulator (our IP is 10.0.2.15) and the peer is NOT an emulator,
-        //    we should try to reach the host at 10.0.2.2.
-        if (localAddress == "10.0.2.15" && !pAddr.startsWith("10.0.2.") && pAddr != "127.0.0.1") {
-            println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Adding 10.0.2.2 as alternative.")
-            // We can't easily add an alternative, but we can try to send HELLO to 10.0.2.2 too
-            scope?.launch {
-                delay(500.milliseconds)
-                sendUdp("10.0.2.2", pPort, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
-            }
-        }
-
-        val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
-        val state = peerStates.compute(fromPeerId) { _, existing ->
-            if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
-            else { existing.info = peerInfo; existing.weSeeThemViaDiscovery = true; existing }
-        }!!
-        // Always send ACK in reply to HELLO — the peer may have missed our earlier ACK
-        sendHandshakeAck(peerInfo)
-        state.weAckedThem = true
-        checkAndEmitJoined(state)
-    }
-
-    private fun handleAckReceived(fromPeerId: String) {
-        val state = peerStates[fromPeerId] ?: return
-        state.theyAckedUs = true
-        checkAndEmitJoined(state)
-    }
-
-    private fun checkAndEmitJoined(state: PeerState) {
-        if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
-            state.isJoined = true
-            println("[PeerNet-$peerId] Peer JOINED: ${state.info.name} (${state.info.id})")
-            scope?.launch { incomingChannel.send(RawPeerMessage.Event.Connected(state.info)) }
-        }
-    }
-
-    private fun sendHandshakeHello(peer: PeerInfo) {
-        val payload = "$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort"
-        sendUdp(peer.address, peer.port, "$peerId:$payload")
-    }
-
-    private fun sendHandshakeAck(peer: PeerInfo) {
-        val payload = "$HANDSHAKE_ACK$peerId"
-        sendUdp(peer.address, peer.port, "$peerId:$payload")
-    }
-
-    private fun sendUdp(address: String, port: Int, message: String) {
-        try {
-            val socket = udpSocket ?: return
-            val data = message.toByteArray(Charsets.UTF_8)
-            val packet = DatagramPacket(data, data.size, InetAddress.getByName(address), port)
-            socket.send(packet)
+        } catch (_: SocketTimeoutException) {
+            // Normal timeout
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            println("[PeerNet-$peerId] Send error to $address:$port: ${e.message}")
+            println("[PeerNet-$peerId] Receive error: ${e.message}")
         }
     }
+}
 
-    private suspend fun processOutgoingCommands() {
-        for (command in outgoingChannel) {
-            when (command) {
-                is PeerCommand.SendTo -> {
-                    peerStates[command.peerId]?.let {
-                        sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
-                    }
+private fun handleHelloReceived(
+    fromPeerId: String,
+    payload: String,
+    fromAddress: String,
+    fromPort: Int,
+    peerId: String,
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    discoveryEvents: SendChannel<DiscoveryEvent>,
+    udpSocket: DatagramSocket,
+    localAddress: String,
+    localPort: Int,
+    peerName: String,
+) {
+    val helloData = payload.removePrefix(HANDSHAKE_HELLO)
+    val parts = helloData.split("|")
+    val pName = parts.getOrNull(0) ?: "Unknown"
+    var pAddr = parts.getOrNull(2) ?: fromAddress
+    var pPort = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT
+
+    if (pAddr == "10.0.2.15") {
+        pAddr = fromAddress
+        pPort = fromPort
+    }
+
+    // If we are an emulator and the peer is not, probe via 10.0.2.2
+    if (localAddress == "10.0.2.15" && !pAddr.startsWith("10.0.2.") && pAddr != "127.0.0.1") {
+        println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Adding 10.0.2.2 as alternative.")
+        discoveryEvents.trySend(
+            DiscoveryEvent.EmulatorProbe(
+                address = "10.0.2.2",
+                port = pPort,
+                helloPayload = "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort",
+            )
+        )
+    }
+
+    val peerInfo = PeerInfo(id = fromPeerId, name = pName, address = pAddr, port = pPort)
+    val state = peerStates.compute(fromPeerId) { _, existing ->
+        if (existing == null) PeerState(info = peerInfo, weSeeThemViaDiscovery = true)
+        else { existing.info = peerInfo; existing.weSeeThemViaDiscovery = true; existing }
+    }!!
+
+    sendHandshakeAck(udpSocket, peerId, peerInfo)
+    state.weAckedThem = true
+    checkAndEmitJoined(state, discoveryEvents)
+}
+
+private fun handleAckReceived(
+    fromPeerId: String,
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    discoveryEvents: SendChannel<DiscoveryEvent>,
+) {
+    val state = peerStates[fromPeerId] ?: return
+    state.theyAckedUs = true
+    checkAndEmitJoined(state, discoveryEvents)
+}
+
+private fun checkAndEmitJoined(state: PeerState, discoveryEvents: SendChannel<DiscoveryEvent>) {
+    if (state.weSeeThemViaDiscovery && state.theyAckedUs && !state.isJoined) {
+        discoveryEvents.trySend(DiscoveryEvent.PeerJoined(state))
+    }
+}
+
+private fun sendHandshakeHello(
+    udpSocket: DatagramSocket,
+    peerId: String,
+    peerName: String,
+    localAddress: String,
+    localPort: Int,
+    peer: PeerInfo,
+) {
+    val payload = "$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort"
+    sendUdp(udpSocket, peer.address, peer.port, "$peerId:$payload")
+}
+
+private fun sendHandshakeAck(udpSocket: DatagramSocket, peerId: String, peer: PeerInfo) {
+    val payload = "$HANDSHAKE_ACK$peerId"
+    sendUdp(udpSocket, peer.address, peer.port, "$peerId:$payload")
+}
+
+private fun sendUdp(udpSocket: DatagramSocket, address: String, port: Int, message: String) {
+    try {
+        val data = message.toByteArray(Charsets.UTF_8)
+        val packet = DatagramPacket(data, data.size, InetAddress.getByName(address), port)
+        udpSocket.send(packet)
+    } catch (_: Exception) {}
+}
+
+private suspend fun processOutgoingCommands(
+    outgoingChannel: ReceiveChannel<PeerCommand>,
+    peerId: String,
+    peerStates: ConcurrentHashMap<String, PeerState>,
+    udpSocket: DatagramSocket,
+) {
+    // Cancellable: channel receive is a suspension point
+    for (command in outgoingChannel) {
+        when (command) {
+            is PeerCommand.SendTo -> {
+                peerStates[command.peerId]?.let {
+                    sendUdp(udpSocket, it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                 }
-                is PeerCommand.Broadcast -> {
-                    peerStates.values.forEach {
-                        sendUdp(it.info.address, it.info.port, "$peerId:${String(command.payload)}")
-                    }
+            }
+            is PeerCommand.Broadcast -> {
+                peerStates.values.forEach {
+                    sendUdp(udpSocket, it.info.address, it.info.port, "$peerId:${String(command.payload)}")
                 }
             }
         }
     }
+}
 
-    fun stop() {
-        isRunning = false
-        try {
-            serviceInfo?.let { jmdns?.unregisterService(it) }
-            jmdns?.close()
-        } catch (e: Exception) {}
-        udpSocket?.close()
-    }
-
-    private fun getLocalIpAddress(): String {
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            var fallback: String? = null
-            while (interfaces.hasMoreElements()) {
-                val ni = interfaces.nextElement()
-                if (ni.isLoopback || !ni.isUp) continue
-                val addrs = ni.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val addr = addrs.nextElement()
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        val ip = addr.hostAddress ?: continue
-                        if (ip == "10.0.2.15") return ip
-                        fallback = ip
-                    }
+private fun getLocalIpAddress(): String {
+    try {
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        var fallback: String? = null
+        while (interfaces.hasMoreElements()) {
+            val ni = interfaces.nextElement()
+            if (ni.isLoopback || !ni.isUp) continue
+            val addrs = ni.inetAddresses
+            while (addrs.hasMoreElements()) {
+                val addr = addrs.nextElement()
+                if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                    val ip = addr.hostAddress ?: continue
+                    if (ip == "10.0.2.15") return ip
+                    fallback = ip
                 }
             }
-            return fallback ?: "127.0.0.1"
-        } catch (e: Exception) {}
-        return "127.0.0.1"
-    }
+        }
+        return fallback ?: "127.0.0.1"
+    } catch (_: Exception) {}
+    return "127.0.0.1"
 }

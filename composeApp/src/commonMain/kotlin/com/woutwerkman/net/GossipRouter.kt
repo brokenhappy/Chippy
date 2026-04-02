@@ -13,7 +13,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private const val LIN_PREFIX = "_PN_LIN_"
-private const val LIN_EVENT = "${LIN_PREFIX}EVENT|"
+internal const val LIN_EVENT = "${LIN_PREFIX}EVENT|"
 private const val LIN_STATE_RESP = "${LIN_PREFIX}STATE_RESP|"
 private const val LIN_REACH = "${LIN_PREFIX}REACH|"
 private const val LIN_ROUTE = "${LIN_PREFIX}ROUTE|"

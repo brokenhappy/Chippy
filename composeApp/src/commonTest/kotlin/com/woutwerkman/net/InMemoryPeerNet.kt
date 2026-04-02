@@ -67,15 +67,14 @@ class InMemoryPeerNet {
     }
 
     /**
-     * Start routing outgoing commands from all peers.
-     * Returns a job that should be cancelled when the test is done.
+     * Routes outgoing commands between all peers until cancelled.
+     * Launch this in a background scope (e.g., `backgroundScope.launch { net.runRouting() }`).
      */
-    fun startRouting(scope: CoroutineScope): Job {
-        return scope.launch {
-            peers.values.forEach { peer ->
-                launch { routeOutgoing(peer) }
-            }
+    suspend fun runRouting(): Nothing = coroutineScope {
+        peers.values.forEach { peer ->
+            launch { routeOutgoing(peer) }
         }
+        awaitCancellation()
     }
 
     private suspend fun routeOutgoing(sender: InMemoryPeer) {

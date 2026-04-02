@@ -7,7 +7,11 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 sealed class WsMessage {
-    /** Sent by host on connect (and periodically) with the client's identity and peer list. */
+    /** Sent by client as the first message on a new connection. */
+    @Serializable
+    data class Hello(val playerName: String = "Web Player") : WsMessage()
+
+    /** Sent by host after receiving Hello/Reconnect, with the client's identity. */
     @Serializable
     data class Identity(
         val localId: String,
@@ -23,9 +27,12 @@ sealed class WsMessage {
     @Serializable
     data class EventSubmission(val event: PeerEvent) : WsMessage()
 
-    /** Sent by client on reconnect to resume an existing session. */
+    /** Sent by client as the first message to resume an existing session on a new host. */
     @Serializable
-    data class Reconnect(val localId: String) : WsMessage()
+    data class Reconnect(
+        val localId: String,
+        val playerName: String = "Web Player",
+    ) : WsMessage()
 }
 
 /** Address of another host's web server, for reconnection. */

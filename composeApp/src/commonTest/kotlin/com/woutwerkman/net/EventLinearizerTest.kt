@@ -43,7 +43,7 @@ class EventLinearizerTest {
         val stateB = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, Channel(Channel.BUFFERED), "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, Channel(Channel.BUFFERED), "Bob", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }
@@ -79,7 +79,7 @@ class EventLinearizerTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, Channel(Channel.BUFFERED), "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, Channel(Channel.BUFFERED), "Bob", clock) }
             launch { gossipRouter(peerC.raw, channelC, Channel(Channel.BUFFERED), "Charlie", clock) }
@@ -112,7 +112,7 @@ class EventLinearizerTest {
         val stateA = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, Channel(Channel.BUFFERED), "Alice", clock) }
             launch { gossipRouter(peerB.raw, channelB, Channel(Channel.BUFFERED), "Bob", clock) }
             launch { withEventLinearizer(channelA, clock) { s -> launch { s.collect { stateA.value = it } }; awaitCancellation() } }
@@ -151,7 +151,7 @@ class EventLinearizerTest {
         val stateC = MutableStateFlow(PeerNetState())
 
         val infra = launch {
-            net.startRouting(this)
+            launch { net.runRouting() }
             launch { gossipRouter(peerA.raw, channelA, Channel(Channel.BUFFERED), "Emulator", clock) }
             launch { gossipRouter(peerB.raw, channelB, Channel(Channel.BUFFERED), "JVM-Host", clock) }
             launch { gossipRouter(peerC.raw, channelC, Channel(Channel.BUFFERED), "iPhone", clock) }

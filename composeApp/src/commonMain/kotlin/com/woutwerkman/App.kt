@@ -39,6 +39,14 @@ fun App() {
                 launch {
                     hostingWebClient(conn) { url ->
                         webHostUrl.value = url
+                        val port = url.substringAfterLast(":").substringBefore("/").toIntOrNull() ?: 0
+                        val secure = url.startsWith("https")
+                        conn.submitEvent(PeerEvent.WebPortChanged(
+                            peerId = conn.localId,
+                            webPort = port,
+                            webSecure = secure,
+                            platform = getPlatform().name,
+                        ))
                         awaitCancellation()
                     }
                 }

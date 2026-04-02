@@ -1,7 +1,6 @@
 package com.woutwerkman.net
 
 import io.ktor.http.*
-import io.ktor.network.tls.certificates.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
@@ -10,17 +9,24 @@ import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.net.Inet4Address
-import java.net.InetAddress
 import java.net.NetworkInterface
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Host a web client server using Ktor Netty with self-signed TLS.
+ * Host a web client server using Ktor Netty over plain HTTP.
  * Shared between JVM desktop and Android targets.
+ *
+ * Plain HTTP is used instead of HTTPS because:
+ * - Self-signed certs cause cert-warning UX issues in browsers (especially Safari)
+ * - LAN-only traffic doesn't need encryption
+ * - Enables seamless WebSocket reconnection to other hosts without cert pinning
  */
 internal suspend fun <T> nettyHostingWebClient(
     connection: PeerNetConnection,
@@ -29,21 +35,13 @@ internal suspend fun <T> nettyHostingWebClient(
     val json = Json { ignoreUnknownKeys = true }
     val localIp = getLocalIpAddress()
     val resources = loadWebClientResources()
-
-    val keyStorePassword = "chippy-web"
-    val keyStore = buildKeyStore {
-        certificate("chippy") {
-            password = keyStorePassword
-            domains = listOf("localhost", localIp)
-            ipAddresses = listOf(InetAddress.getByName(localIp), InetAddress.getByName("127.0.0.1"))
-        }
-    }
+    val activeWebClients = ConcurrentHashMap.newKeySet<String>()
 
     val appModule: Application.() -> Unit = {
         install(io.ktor.server.websocket.WebSockets)
         routing {
             webSocket("/ws") {
-                handleWebSocketSession(connection, json)
+                handleWebSocketSession(connection, json, activeWebClients)
             }
             get("/") {
                 serveResource(call, resources, "index.html")
@@ -57,36 +55,75 @@ internal suspend fun <T> nettyHostingWebClient(
 
     val environment = applicationEnvironment {}
     val server = embeddedServer(Netty, environment, configure = {
-        sslConnector(
-            keyStore = keyStore,
-            keyAlias = "chippy",
-            keyStorePassword = { keyStorePassword.toCharArray() },
-            privateKeyPassword = { keyStorePassword.toCharArray() },
-        ) {
+        connector {
             port = 0
         }
     }, appModule).also { it.start(wait = false) }
 
     val actualPort = server.engine.resolvedConnectors().first().port
-    val url = "https://$localIp:$actualPort"
+    val url = "http://$localIp:$actualPort"
     println("[WebHost] Serving at $url")
 
     try {
         block(url)
     } finally {
         server.stop(500, 1000)
+        // Clean up any web clients that weren't removed during server shutdown.
+        // The handler's finally block may have failed to submit Left events
+        // because the connection's event processing was already cancelled.
+        for (virtualId in activeWebClients) {
+            try {
+                connection.submitEvent(PeerEvent.Left(virtualId))
+            } catch (_: Exception) { }
+        }
+        // Fallback: directly apply cleanup to state. When the event-processing
+        // coroutine (linearizer) is already cancelled, submitEvent sends to a
+        // buffered channel that no one reads. Apply Left events directly to
+        // guarantee web client entries are removed.
+        @Suppress("UNCHECKED_CAST")
+        (connection.state as? MutableStateFlow<PeerNetState>)?.update { state ->
+            activeWebClients.fold(state) { s, id ->
+                if (s.discoveredPeers.containsKey(id)) s.after(PeerEvent.Left(id)).first else s
+            }
+        }
     }
 }
 
 private suspend fun DefaultWebSocketServerSession.handleWebSocketSession(
     connection: PeerNetConnection,
     json: Json,
+    activeWebClients: MutableSet<String>,
 ) {
-    val sessionId = UUID.randomUUID().toString().take(8)
-    val virtualId = "web-${connection.localId}-$sessionId"
+    // Client-first handshake: wait for Hello or Reconnect to determine session identity.
+    val firstFrame = incoming.receive()
+    val handshake = if (firstFrame is Frame.Text) {
+        try { json.decodeFromString<WsMessage>(firstFrame.readText()) }
+        catch (_: Exception) { null }
+    } else null
+
+    val virtualId: String
+    val playerName: String
+    when (handshake) {
+        is WsMessage.Reconnect -> {
+            virtualId = handshake.localId
+            playerName = handshake.playerName
+        }
+        is WsMessage.Hello -> {
+            val sessionId = UUID.randomUUID().toString().take(8)
+            virtualId = "web-${connection.localId}-$sessionId"
+            playerName = handshake.playerName
+        }
+        else -> {
+            val sessionId = UUID.randomUUID().toString().take(8)
+            virtualId = "web-${connection.localId}-$sessionId"
+            playerName = "Web Player"
+        }
+    }
+
+    activeWebClients.add(virtualId)
 
     connection.submitEvent(
-        PeerEvent.Joined(PeerInfo(id = virtualId, name = "Web Player", address = "", port = 0))
+        PeerEvent.Joined(PeerInfo(id = virtualId, name = playerName, address = "", port = 0))
     )
 
     val identityMsg = json.encodeToString<WsMessage>(
@@ -117,13 +154,16 @@ private suspend fun DefaultWebSocketServerSession.handleWebSocketSession(
                     }
                     when (msg) {
                         is WsMessage.EventSubmission -> connection.submitEvent(msg.event)
-                        is WsMessage.Reconnect -> { /* TODO Phase 2 */ }
                         else -> {}
                     }
                 }
             }
         } finally {
-            connection.submitEvent(PeerEvent.Left(virtualId))
+            try {
+                connection.submitEvent(PeerEvent.Left(virtualId))
+            } catch (_: Exception) {
+                // Scope may be cancelled; cleanup handled by nettyHostingWebClient's finally
+            }
             println("[WebHost] Web client $virtualId disconnected")
         }
     }

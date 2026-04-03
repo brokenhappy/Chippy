@@ -6,6 +6,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.awaitCancellation
 import platform.Foundation.*
 import platform.darwin.*
 import platform.posix.*
@@ -59,6 +60,8 @@ private data class PeerState(
     val theyAckedUs: Boolean = false,
     val weAckedThem: Boolean = false,
     val isJoined: Boolean = false,
+    val bleConnected: Boolean = false,
+    val udpHandshakeComplete: Boolean = false,
 )
 
 /**
@@ -106,6 +109,7 @@ private class AtomicPeerStates {
  */
 private sealed class DiscoveryEvent {
     data class ServiceResolved(val service: NSNetService) : DiscoveryEvent()
+    data class BleServiceResolved(val peerInfo: PeerInfo) : DiscoveryEvent()
     data class PeerJoined(val peerId: String) : DiscoveryEvent()
 }
 
@@ -133,10 +137,20 @@ private suspend fun <T> withIosPeerTransport(
     val boundPort = getSocketBoundPort(udpSocket)
     NSLog("[PeerNet-$peerId] Listening on port $boundPort")
 
+    // BLE send function — set when BLE transport is active
+    var bleSendToPeer: ((String, ByteArray) -> Boolean)? = null
+
     val broadcastFn: (ByteArray) -> Unit = { payload ->
         val message = "$peerId:${payload.decodeToString()}"
-        peerStates.snapshot().values.forEach { state ->
-            sendUdp(state.info.address, state.info.port, message)
+        peerStates.snapshot().forEach { (pId, state) ->
+            if (state.udpHandshakeComplete) {
+                sendUdp(state.info.address, state.info.port, message)
+            } else if (state.bleConnected) {
+                bleSendToPeer?.invoke(pId, payload)
+            } else {
+                // Best effort: try UDP anyway
+                sendUdp(state.info.address, state.info.port, message)
+            }
         }
     }
 
@@ -159,7 +173,7 @@ private suspend fun <T> withIosPeerTransport(
             launch {
                 // Cancellable: channel receive is a suspension point
                 for (command in outgoingChannel) {
-                    handleCommand(command, peerId, peerStates)
+                    handleCommand(command, peerId, peerStates, bleSendToPeer)
                 }
             }
             launch {
@@ -176,11 +190,33 @@ private suspend fun <T> withIosPeerTransport(
                     delay(50.milliseconds)
 
                     peerStates.snapshot().forEach { (pId, state) ->
-                        if (state.weSeeThemViaDiscovery && !state.isJoined) {
+                        if (state.weSeeThemViaDiscovery && !state.isJoined && state.info.port > 0) {
                             sendHandshakeHello(peerId, config.displayName, localAddress, boundPort, state.info)
                             peerStates.update(pId) { it.copy(weSentHello = true) }
                         }
                     }
+                }
+            }
+            // BLE transport — discovery + data fallback
+            launch {
+                withBleTransport(peerId, localAddress, boundPort) { ble ->
+                    bleSendToPeer = ble.sendToPeer
+                    // Forward BLE discoveries into the shared discovery channel
+                    launch {
+                        for (peerInfo in ble.discoveredPeers) {
+                            discoveryEvents.trySend(DiscoveryEvent.BleServiceResolved(peerInfo))
+                        }
+                    }
+                    // Forward BLE incoming data into the main incoming channel
+                    launch {
+                        for ((fromPeerId, payload) in ble.incoming) {
+                            if (peerStates.snapshot().containsKey(fromPeerId)) {
+                                incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload))
+                            }
+                        }
+                    }
+                    // Keep alive until parent scope cancels
+                    awaitCancellation()
                 }
             }
 
@@ -288,6 +324,24 @@ private suspend fun processDiscoveryEvents(
                     }
                     peerStates.update(pId) { it.copy(weSeeThemViaDiscovery = true, weSentHello = true) }
 
+                    sendHandshakeHello(peerId, peerName, localAddress, boundPort, peerInfo)
+                }
+            }
+            is DiscoveryEvent.BleServiceResolved -> {
+                val peerInfo = event.peerInfo
+                val pId = peerInfo.id
+
+                if (pId == peerId) continue
+
+                peerStates.getOrPut(pId) {
+                    NSLog("[PeerNet-$peerId] Discovered via BLE: ${peerInfo.name} ($pId) at ${peerInfo.address}:${peerInfo.port}")
+                    PeerState(info = peerInfo)
+                }
+                peerStates.update(pId) { it.copy(bleConnected = true, weSeeThemViaDiscovery = true) }
+
+                // Try UDP handshake — if it succeeds, we'll prefer UDP (skip if port is 0)
+                if (peerInfo.port > 0) {
+                    peerStates.update(pId) { it.copy(weSentHello = true) }
                     sendHandshakeHello(peerId, peerName, localAddress, boundPort, peerInfo)
                 }
             }
@@ -463,7 +517,7 @@ private fun handleAckReceived(
     discoveryEvents: SendChannel<DiscoveryEvent>,
 ) {
     NSLog("[PeerNet-$peerId] Received ACK from: $fromPeerId")
-    val state = peerStates.update(fromPeerId) { it.copy(theyAckedUs = true) } ?: return
+    val state = peerStates.update(fromPeerId) { it.copy(theyAckedUs = true, udpHandshakeComplete = true) } ?: return
     checkAndEmitJoined(fromPeerId, state, discoveryEvents)
 }
 
@@ -484,18 +538,35 @@ private fun sendHandshakeAck(peerId: String, peer: PeerInfo) {
     sendUdp(peer.address, peer.port, "$peerId:$payload")
 }
 
-private fun handleCommand(command: PeerCommand, peerId: String, peerStates: AtomicPeerStates) {
+private fun handleCommand(
+    command: PeerCommand,
+    peerId: String,
+    peerStates: AtomicPeerStates,
+    bleSendToPeer: ((String, ByteArray) -> Boolean)?,
+) {
     val snapshot = peerStates.snapshot()
     when (command) {
         is PeerCommand.SendTo -> {
             val state = snapshot[command.peerId]
             if (state != null) {
-                sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+                if (state.udpHandshakeComplete) {
+                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+                } else if (state.bleConnected) {
+                    bleSendToPeer?.invoke(command.peerId, command.payload)
+                } else {
+                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+                }
             }
         }
         is PeerCommand.Broadcast -> {
-            snapshot.values.forEach { state ->
-                sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+            snapshot.forEach { (pId, state) ->
+                if (state.udpHandshakeComplete) {
+                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+                } else if (state.bleConnected) {
+                    bleSendToPeer?.invoke(pId, command.payload)
+                } else {
+                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
+                }
             }
         }
     }

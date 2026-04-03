@@ -41,8 +41,10 @@ class TestCoordinator(
                 platforms.forEach { platform ->
                     launch {
                         // Any exception here will cancel all siblings and propagate up
-                        // Each platform targets only the OTHER platform types
-                        val otherTypes = platforms.map { it.type }.toSet() - platform.type
+                        // Each platform targets only the OTHER platform types.
+                        // MAC_BLE_HELPER is excluded from network peer targets — it's a
+                        // standalone BLE discovery test, not a gossip network participant.
+                        val otherTypes = platforms.map { it.type }.toSet() - platform.type - TestPlatform.MAC_BLE_HELPER
                         platform.launcher.launch(
                             instanceId = platform.instanceId,
                             platformsString = otherTypes.joinToString(",") { it.toPlatformString() },

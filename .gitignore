@@ -17,3 +17,8 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
+
+# BLE test helper — only source + Info.plist should be committed
+bleTestHelper/ble-test-helper
+bleTestHelper/BleTestHelper.app/Contents/MacOS/
+bleTestHelper/BleTestHelper.app/Contents/_CodeSignature/

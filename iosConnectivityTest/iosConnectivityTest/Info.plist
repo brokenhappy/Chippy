@@ -41,5 +41,7 @@
     <array>
         <string>_chippy-test._udp.</string>
     </array>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Chippy uses Bluetooth to discover and connect with nearby players when WiFi discovery is unavailable.</string>
 </dict>
 </plist>

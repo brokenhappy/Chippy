@@ -12,6 +12,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
@@ -369,7 +370,11 @@ suspend fun <T> withEventLinearizer(
             scheduled = newScheduled
         }
     }
-    block(state)
+    try {
+        block(state)
+    } finally {
+        coroutineContext.cancelChildren()
+    }
 }
 
 fun List<EventWithTime>.replayAndSchedule(

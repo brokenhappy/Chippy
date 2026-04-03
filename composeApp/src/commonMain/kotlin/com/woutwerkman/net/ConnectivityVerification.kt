@@ -12,7 +12,8 @@ enum class TestPlatform {
     ANDROID_SIMULATOR,
     ANDROID_REAL_DEVICE,
     IOS_SIMULATOR,
-    IOS_REAL_DEVICE;
+    IOS_REAL_DEVICE,
+    MAC_BLE_HELPER;
 
     fun toPlatformString(): String = name.lowercase().replace('_', '-')
 
@@ -23,6 +24,7 @@ enum class TestPlatform {
             "android-real-device" -> ANDROID_REAL_DEVICE
             "ios-simulator" -> IOS_SIMULATOR
             "ios-real-device" -> IOS_REAL_DEVICE
+            "mac-ble-helper" -> MAC_BLE_HELPER
             else -> null
         }
 
@@ -34,6 +36,7 @@ enum class TestPlatform {
             peerId.startsWith("ios-sim") -> IOS_SIMULATOR
             peerId.startsWith("ios-device") -> IOS_REAL_DEVICE
             peerId.startsWith("ios-") -> IOS_REAL_DEVICE // fallback for generic ios IDs
+            peerId.startsWith("mac-ble-") -> MAC_BLE_HELPER
             else -> null
         }
     }
@@ -102,8 +105,8 @@ private suspend fun CoroutineScope.verifyConnectivity(
         println("[${config.instanceId}] All platforms found in linearized state!")
         println("[${config.instanceId}] Peers: ${finalState.discoveredPeers.values.map { "${it.name} (${it.id})" }}")
 
-        // Keep connection alive so slower peers can complete their handshakes
-        delay(5.seconds)
+        // Keep connection alive so slower peers (e.g. BLE) can complete their handshakes
+        delay(15.seconds)
         println("[${config.instanceId}] SUCCESS: All platforms connected via linearized peer network!")
         return ConnectivityTestResult.Success
     } catch (e: CancellationException) {

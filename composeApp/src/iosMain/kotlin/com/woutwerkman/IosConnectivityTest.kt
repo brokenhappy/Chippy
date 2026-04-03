@@ -27,8 +27,8 @@ fun runIosConnectivityTest(
     val config = ConnectivityTestConfig(
         instanceId = instanceId,
         targetPlatforms = targetPlatforms,
-        discoveryTimeoutMs = 30_000,
-        testTimeoutMs = 60_000
+        discoveryTimeoutMs = 60_000,
+        testTimeoutMs = 90_000
     )
 
     CoroutineScope(Dispatchers.Main + SupervisorJob()).launch {

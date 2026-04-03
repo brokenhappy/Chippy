@@ -184,7 +184,7 @@ tasks.register<JavaExec>("testConnectibility") {
     description = "Test network connectivity between platforms"
 
     // Set a timeout to prevent it from hanging forever in CI
-    timeout.set(Duration.ofSeconds(60))
+    timeout.set(Duration.ofSeconds(180))
 
     val jvmCompilation = kotlin.targets.getByName("jvm").compilations.getByName("main")
     val runtimeFiles = jvmCompilation.runtimeDependencyFiles ?: files()

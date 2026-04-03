@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.woutwerkman.BleTestHelper</string>
+    <key>CFBundleName</key>
+    <string>BleTestHelper</string>
+    <key>CFBundleExecutable</key>
+    <string>ble-test-helper</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>BLE Test Helper uses Bluetooth to test peer discovery with nearby iOS devices.</string>
+</dict>
+</plist>

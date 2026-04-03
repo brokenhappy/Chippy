@@ -7,26 +7,86 @@ let peerInfoUUID = CBUUID(string: "7C3E0001-C4F1-4D5A-A1E2-000000000000")
 let dataWriteUUID = CBUUID(string: "7C3E0002-C4F1-4D5A-A1E2-000000000000")
 let dataNotifyUUID = CBUUID(string: "7C3E0003-C4F1-4D5A-A1E2-000000000000")
 
-let instanceId = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "mac-ble-helper"
-let timeoutSeconds: TimeInterval = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 60 : 60
+// Parse arguments: instanceId [--control-host HOST --control-port PORT]
+let instanceId: String
+var controlHost: String? = nil
+var controlPort: Int32 = 0
 
-// Always log to a known file so the test runner can read output
-let logFilePath: String? = "/tmp/ble-test-helper.log"
+do {
+    let args = CommandLine.arguments
+    instanceId = args.count > 1 ? args[1] : "mac-ble-helper"
 
-let logFileHandle: FileHandle? = {
-    guard let path = logFilePath else { return nil }
-    FileManager.default.createFile(atPath: path, contents: nil)
-    return FileHandle(forWritingAtPath: path)
-}()
+    for (index, arg) in args.enumerated() {
+        if arg == "--control-host" && index + 1 < args.count {
+            controlHost = args[index + 1]
+        }
+        if arg == "--control-port" && index + 1 < args.count {
+            controlPort = Int32(args[index + 1]) ?? 0
+        }
+    }
+}
+
+// --- TCP Control Channel ---
+
+class ControlChannel {
+    private let fd: Int32
+
+    init?(host: String, port: Int32) {
+        fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            log("Failed to create control socket")
+            return nil
+        }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, host, &addr.sin_addr)
+
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        guard result == 0 else {
+            log("Failed to connect to control server \(host):\(port) (errno=\(errno))")
+            Darwin.close(fd)
+            return nil
+        }
+
+        log("Connected to control server \(host):\(port)")
+    }
+
+    func sendLine(_ line: String) {
+        let data = "\(line)\n".data(using: .utf8)!
+        data.withUnsafeBytes { ptr in
+            _ = Darwin.write(fd, ptr.baseAddress!, data.count)
+        }
+    }
+
+    func readLine() -> String? {
+        var buffer = ""
+        var byte: UInt8 = 0
+        while true {
+            let n = Darwin.read(fd, &byte, 1)
+            if n <= 0 { return nil }
+            if byte == UInt8(ascii: "\n") { break }
+            buffer.append(Character(UnicodeScalar(byte)))
+        }
+        return buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func shutdown() {
+        Darwin.close(fd)
+    }
+}
+
+// --- Logging ---
 
 func log(_ msg: String) {
-    let line = "[BLE-Helper] \(msg)\n"
     print("[BLE-Helper] \(msg)")
     fflush(stdout)
-    if let handle = logFileHandle, let data = line.data(using: .utf8) {
-        handle.write(data)
-        handle.synchronizeFile()
-    }
 }
 
 // --- PeerInfo binary encoding (matches BlePeerInfo.kt) ---
@@ -105,29 +165,66 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
     var peerInfoData: Data!
     var discoveredPeerIds = Set<String>()
     var succeeded = false
+    var control: ControlChannel?
+    var waitingForStart = true
 
-    func start() {
+    func start(control: ControlChannel?) {
+        self.control = control
         peerInfoData = encodePeerInfo(peerId: instanceId, address: localAddress, port: localPort)
         log("Starting BLE test helper: \(instanceId)")
         log("Local address: \(localAddress)")
 
-        // Check Bluetooth authorization
         if #available(macOS 10.15, *) {
             let authStatus = CBManager.authorization
-            log("Bluetooth authorization: \(authStatus.rawValue) (0=notDetermined, 1=restricted, 2=denied, 3=allowedAlways)")
+            log("Bluetooth authorization: \(authStatus.rawValue)")
         }
-
-        log("App started")
 
         centralManager = CBCentralManager(delegate: self, queue: nil)
         peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
         log("Managers created, waiting for state callbacks...")
 
-        // Timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
-            if !self.succeeded {
-                log("TIMEOUT: No peers discovered within \(Int(timeoutSeconds))s")
-                exit(1)
+        if let ctrl = control {
+            // TCP control channel mode: identify, send READY, wait for START
+            ctrl.sendLine("HELLO:\(instanceId)")
+            ctrl.sendLine("READY")
+            log("Sent READY to coordinator")
+
+            DispatchQueue.global().async {
+                if let line = ctrl.readLine(), line == "START" {
+                    log("Received START from coordinator")
+                    DispatchQueue.main.async {
+                        self.waitingForStart = false
+                        // Scanning/advertising was already started by Bluetooth power-on callbacks,
+                        // so nothing extra to do here — the gate only gates reporting results.
+                    }
+                }
+            }
+        } else {
+            waitingForStart = false
+            // No control channel: timeout fallback
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                if !self.succeeded {
+                    log("TIMEOUT: No peers discovered within 60s")
+                    exit(1)
+                }
+            }
+        }
+    }
+
+    private func reportSuccess(peerId: String, via: String) {
+        guard !succeeded else { return }
+        succeeded = true
+        log("SUCCESS: Discovered peer '\(peerId)' via BLE \(via)")
+
+        if let ctrl = control {
+            ctrl.sendLine("FOUND:mac-ble-helper")
+            ctrl.sendLine("DONE")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                exit(0)
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                exit(0)
             }
         }
     }
@@ -135,10 +232,7 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
     // --- CBCentralManagerDelegate ---
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        log("Central state: \(central.state.rawValue) (0=unknown, 1=resetting, 2=unsupported, 3=unauthorized, 4=poweredOff, 5=poweredOn)")
-        if #available(macOS 10.15, *) {
-            log("Authorization after state change: \(CBManager.authorization.rawValue)")
-        }
+        log("Central state: \(central.state.rawValue)")
         if central.state == .poweredOn {
             log("Scanning for Chippy BLE peers...")
             central.scanForPeripherals(withServices: [serviceUUID], options: nil)
@@ -163,7 +257,6 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         log("Failed to connect: \(error?.localizedDescription ?? "unknown")")
-        // Retry connection after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             log("Retrying connection to \(peripheral.identifier)...")
             central.connect(peripheral, options: nil)
@@ -199,7 +292,6 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard error == nil else {
             log("Read error: \(error!.localizedDescription) — will disconnect and retry")
-            // Disconnect and reconnect to clear cached GATT handles
             centralManager.cancelPeripheralConnection(peripheral)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 log("Reconnecting to \(peripheral.identifier)...")
@@ -212,12 +304,11 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
         if characteristic.uuid == peerInfoUUID {
             if let info = decodePeerInfo(data: data) {
                 log("Read PeerInfo: peerId=\(info.peerId), address=\(info.address), port=\(info.port)")
-                discoveredPeerIds.insert(info.peerId)
-                log("SUCCESS: Discovered peer '\(info.peerId)' via BLE")
-                succeeded = true
-                // Keep running briefly so the other side can also discover us
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    exit(0)
+                if !waitingForStart {
+                    reportSuccess(peerId: info.peerId, via: "PeerInfo read")
+                } else {
+                    discoveredPeerIds.insert(info.peerId)
+                    log("Peer found but waiting for START gate")
                 }
             }
         }
@@ -226,7 +317,7 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
     // --- CBPeripheralManagerDelegate ---
 
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        log("Peripheral state: \(peripheral.state.rawValue) (0=unknown, 1=resetting, 2=unsupported, 3=unauthorized, 4=poweredOff, 5=poweredOn)")
+        log("Peripheral state: \(peripheral.state.rawValue)")
         if peripheral.state == .poweredOn {
             let peerInfoChar = CBMutableCharacteristic(
                 type: peerInfoUUID,
@@ -274,15 +365,14 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
             if let data = req.value, req.characteristic.uuid == dataWriteUUID {
                 if let message = String(data: data, encoding: .utf8) {
                     log("Received data write: \(message.prefix(50))")
-                    // Parse "peerId:payload" format — receiving data from a peer proves connectivity
                     if let colonIndex = message.firstIndex(of: ":") {
                         let fromPeerId = String(message[message.startIndex..<colonIndex])
                         if !fromPeerId.isEmpty && !discoveredPeerIds.contains(fromPeerId) {
                             discoveredPeerIds.insert(fromPeerId)
-                            log("SUCCESS: Discovered peer '\(fromPeerId)' via BLE data write")
-                            succeeded = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                exit(0)
+                            if !waitingForStart {
+                                reportSuccess(peerId: fromPeerId, via: "data write")
+                            } else {
+                                log("Peer found via data write but waiting for START gate")
                             }
                         }
                     }
@@ -294,11 +384,18 @@ class BleTestHelper: NSObject, CBCentralManagerDelegate, CBPeripheralManagerDele
 
 // --- Main ---
 
-// When launched via `open`, redirect stdout to log file for the test runner to read
-if let logPath = logFilePath {
-    log("Log file: \(logPath)")
+let control: ControlChannel?
+if let host = controlHost, controlPort > 0 {
+    control = ControlChannel(host: host, port: controlPort)
+    if control == nil {
+        log("ERROR: Failed to connect to control server")
+        exit(1)
+    }
+} else {
+    control = nil
+    log("No control channel — running in standalone mode")
 }
 
 let helper = BleTestHelper()
-helper.start()
+helper.start(control: control)
 RunLoop.main.run()

@@ -18,6 +18,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let args = CommandLine.arguments
         var instanceId = "ios-\(Int(Date().timeIntervalSince1970 * 1000) % 100000000)"
         var platforms = "jvm,ios-real-device"
+        var controlHost: String? = nil
+        var controlPort: Int32 = 0
 
         for (index, arg) in args.enumerated() {
             if arg == "--instance-id" && index + 1 < args.count {
@@ -26,19 +28,40 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             if arg == "--platforms" && index + 1 < args.count {
                 platforms = args[index + 1]
             }
+            if arg == "--control-host" && index + 1 < args.count {
+                controlHost = args[index + 1]
+            }
+            if arg == "--control-port" && index + 1 < args.count {
+                controlPort = Int32(args[index + 1]) ?? 0
+            }
         }
 
         print("[iOS-Test] Starting connectivity test")
-        print("[iOS-Test] instanceId=\(instanceId), platforms=\(platforms)")
+        print("[iOS-Test] instanceId=\(instanceId), platforms=\(platforms), control=\(controlHost ?? "none"):\(controlPort)")
 
-        // Run the Kotlin connectivity test
-        IosConnectivityTestKt.runIosConnectivityTest(
-            instanceId: instanceId,
-            platforms: platforms
-        ) { success, message in
-            print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                exit(success.boolValue ? 0 : 1)
+        if let host = controlHost, controlPort > 0 {
+            // New: TCP control channel mode
+            IosConnectivityTestKt.runIosConnectivityTest(
+                instanceId: instanceId,
+                platforms: platforms,
+                controlHost: host,
+                controlPort: controlPort
+            ) { success, message in
+                print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    exit(success.boolValue ? 0 : 1)
+                }
+            }
+        } else {
+            // Legacy: no control channel
+            IosConnectivityTestKt.runIosConnectivityTest(
+                instanceId: instanceId,
+                platforms: platforms
+            ) { success, message in
+                print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    exit(success.boolValue ? 0 : 1)
+                }
             }
         }
 

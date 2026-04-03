@@ -7,10 +7,10 @@ import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * Entry point for the new structured connectivity test.
+ * Entry point for the structured connectivity test.
  * Usage: java -cp ... com.woutwerkman.connectivitytest.ConnectivityTestRunnerKt [platforms]
  *
- * Platforms can be: jvm, android-simulator, ios-simulator, ios-real-device
+ * Platforms can be: jvm, android-simulator, ios-simulator, ios-real-device, mac-ble-helper
  * If no platforms specified, auto-detects available platforms.
  */
 fun main(args: Array<String>) {
@@ -31,13 +31,13 @@ fun main(args: Array<String>) {
     when (result) {
         is TestCoordinator.TestResult.Success -> {
             println("\n" + "=".repeat(80))
-            println("✓ SUCCESS: All platforms connected!")
+            println("SUCCESS: All platforms connected!")
             println("=".repeat(80))
             exitProcess(0)
         }
         is TestCoordinator.TestResult.Failure -> {
             System.err.println("\n" + "=".repeat(80))
-            System.err.println("✗ FAILURE: ${result.message}")
+            System.err.println("FAILURE: ${result.message}")
             result.cause?.printStackTrace()
             System.err.println("=".repeat(80))
             exitProcess(1)
@@ -48,7 +48,6 @@ fun main(args: Array<String>) {
 suspend fun runStructuredConnectivityTest(
     requestedPlatforms: List<String>
 ): TestCoordinator.TestResult {
-    // Detect available platforms
     val availablePlatforms = detectAvailablePlatforms(requestedPlatforms)
 
     if (availablePlatforms.isEmpty()) {
@@ -58,13 +57,11 @@ suspend fun runStructuredConnectivityTest(
     println("Testing platforms: ${availablePlatforms.joinToString(", ") { it.type.toString() }}")
     println()
 
-    // Create coordinator — use longer timeout when BLE helper is involved
-    // since BLE discovery can take additional time
-    val hasBle = availablePlatforms.any { it.type == TestPlatform.MAC_BLE_HELPER }
     val coordinator = TestCoordinator(
         platforms = availablePlatforms,
-        discoveryTimeout = if (hasBle) 90.seconds else 30.seconds,
-        logger = ::println
+        spinUpTimeout = 15.seconds,
+        discoveryTimeout = 20.seconds,
+        logger = ::println,
     )
 
     return coordinator.run()
@@ -72,9 +69,6 @@ suspend fun runStructuredConnectivityTest(
 
 /**
  * Detect which platforms are available and create configs for them.
- *
- * Detects non-JVM platforms first, then adds JVM targeting only the
- * platforms that were actually found (not all possible platforms).
  */
 fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
@@ -82,7 +76,6 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
         listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
     }
 
-    // Detect non-JVM platforms first so we know what JVM should target
     for (platform in platformsToCheck) {
         when (platform.lowercase()) {
             "jvm" -> { /* handled after all other platforms are detected */ }
@@ -90,7 +83,6 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
             "android-simulator", "android-real-device" -> {
                 val devices = getConnectedAndroidDevices()
                 val targetPlatform = TestPlatform.fromString(platform) ?: continue
-
                 val matchingDevices = devices.filter { it.second == targetPlatform }
 
                 if (matchingDevices.isEmpty() && requested.contains(platform)) {
@@ -105,7 +97,7 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                             PlatformConfig(
                                 type = platformType,
                                 instanceId = instanceId,
-                                launcher = AndroidLauncher(deviceId, apkPath)
+                                runner = AndroidLauncher(deviceId, apkPath),
                             )
                         )
                     }
@@ -119,12 +111,12 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                 }
                 if (simulators.isNotEmpty()) {
                     val simulator = simulators.first()
-                    buildIosSimulatorApp(simulator.first) // Throws on failure
+                    buildIosSimulatorApp(simulator.first)
                     configs.add(
                         PlatformConfig(
                             type = TestPlatform.IOS_SIMULATOR,
                             instanceId = "ios-sim",
-                            launcher = IosSimulatorLauncher(simulator.first)
+                            runner = IosSimulatorLauncher(simulator.first),
                         )
                     )
                 }
@@ -137,12 +129,12 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                 }
                 if (devices.isNotEmpty()) {
                     val device = devices.first()
-                    buildIosDeviceApp(device.first) // Throws on failure
+                    buildIosDeviceApp(device.first)
                     configs.add(
                         PlatformConfig(
                             type = TestPlatform.IOS_REAL_DEVICE,
                             instanceId = "ios-device",
-                            launcher = IosDeviceLauncher(device.first)
+                            runner = IosDeviceLauncher(device.first),
                         )
                     )
                 }
@@ -155,7 +147,7 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                         PlatformConfig(
                             type = TestPlatform.MAC_BLE_HELPER,
                             instanceId = "mac-ble-helper",
-                            launcher = BleHelperLauncher(binaryPath)
+                            runner = BleHelperLauncher(binaryPath),
                         )
                     )
                 } else if (requested.contains("mac-ble-helper")) {
@@ -166,31 +158,17 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
     }
 
     // Always add JVM when there are other network platforms — it acts as a gossip relay
-    // for peers on isolated networks (e.g., emulator on 10.0.2.x ↔ iPhone on WiFi).
-    // The linearization engine re-broadcasts events, so all peers converge.
-    // Note: MAC_BLE_HELPER is excluded — it's a standalone BLE discovery test, not a network peer.
     val networkConfigs = configs.filter { it.type != TestPlatform.MAC_BLE_HELPER }
     if (networkConfigs.none { it.type == TestPlatform.JVM }) {
         val detectedNonJvmTypes = networkConfigs.map { it.type }.toSet()
         val hasOtherPlatforms = detectedNonJvmTypes.isNotEmpty()
         val jvmCount = if (hasOtherPlatforms) 1 else 2
-        val jvmTargets = if (hasOtherPlatforms) {
-            detectedNonJvmTypes
-        } else {
-            setOf(TestPlatform.JVM)
-        }
         repeat(jvmCount) { i ->
             configs.add(
                 PlatformConfig(
                     type = TestPlatform.JVM,
                     instanceId = "jvm-${i + 1}",
-                    launcher = JvmLauncher(
-                        ConnectivityTestConfig(
-                            instanceId = "jvm-${i + 1}",
-                            targetPlatforms = jvmTargets,
-                            testTimeoutMs = if (configs.any { it.type == TestPlatform.MAC_BLE_HELPER }) 120_000 else 60_000,
-                        )
-                    )
+                    runner = JvmLauncher(),
                 )
             )
         }
@@ -200,7 +178,6 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
 }
 
 // Helper functions for platform detection and building
-// These will call the existing functions from build.gradle.kts
 
 private var cachedBleHelperPath: String? = null
 
@@ -314,7 +291,6 @@ fun getConnectedIosDevices(): List<Pair<String, String>> {
         val output = process.inputStream.bufferedReader().readText()
         val devices = mutableListOf<Pair<String, String>>()
         for (line in output.lines()) {
-            // Format: "iPhone               iPhone.coredevice.local             866A6B20-95FD-558C-AD2F-8E276942D936   connected            iPhone 13 Pro"
             if (line.contains("connected") && line.contains("iPhone")) {
                 val parts = line.split(Regex("\\s+"))
                 if (parts.size >= 3) {
@@ -352,7 +328,6 @@ fun buildIosSimulatorApp(udid: String) {
     println("Building iOS simulator app...")
     val rootDir = System.getProperty("project.root") ?: "."
 
-    // Build Kotlin framework
     var process = ProcessBuilder(
         "$rootDir/gradlew",
         ":composeApp:linkDebugFrameworkIosSimulatorArm64",
@@ -364,7 +339,6 @@ fun buildIosSimulatorApp(udid: String) {
         throw IllegalStateException("Failed to build Kotlin framework for iOS simulator")
     }
 
-    // Build Xcode project
     process = ProcessBuilder(
         "xcodebuild",
         "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
@@ -381,7 +355,6 @@ fun buildIosSimulatorApp(udid: String) {
         throw IllegalStateException("Failed to build iOS simulator app with Xcode")
     }
 
-    // Install on simulator
     process = ProcessBuilder(
         "xcrun", "simctl", "install",
         udid,
@@ -397,7 +370,6 @@ fun buildIosDeviceApp(udid: String) {
     println("Building iOS device app...")
     val rootDir = System.getProperty("project.root") ?: "."
 
-    // Build Kotlin framework for iOS device first
     var process = ProcessBuilder(
         "$rootDir/gradlew",
         ":composeApp:linkDebugFrameworkIosArm64",
@@ -409,8 +381,6 @@ fun buildIosDeviceApp(udid: String) {
         throw IllegalStateException("Failed to build Kotlin framework for iOS device")
     }
 
-    // The Xcode project's file reference points to iosSimulatorArm64, but we built for iosArm64.
-    // Symlink so the "Embed Frameworks" build phase finds the framework at the expected path.
     val simFrameworkDir = java.io.File("$rootDir/composeApp/build/bin/iosSimulatorArm64/debugFramework")
     val simFramework = java.io.File(simFrameworkDir, "ComposeApp.framework")
     if (!simFramework.exists()) {
@@ -419,7 +389,6 @@ fun buildIosDeviceApp(udid: String) {
         ProcessBuilder("ln", "-s", deviceFramework.absolutePath, simFramework.absolutePath).start().waitFor()
     }
 
-    // Build Xcode project - try using existing DerivedData first
     val xcodeDerivedDataApp = java.io.File(System.getProperty("user.home"))
         .resolve("Library/Developer/Xcode/DerivedData")
         .listFiles()
@@ -430,7 +399,6 @@ fun buildIosDeviceApp(udid: String) {
         println("Using existing Xcode build from: ${xcodeDerivedDataApp.absolutePath}")
         xcodeDerivedDataApp.absolutePath
     } else {
-        // Build with Xcode using -sdk iphoneos (avoids destination resolution issues)
         process = ProcessBuilder(
             "xcodebuild",
             "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
@@ -444,7 +412,6 @@ fun buildIosDeviceApp(udid: String) {
             "build"
         ).directory(java.io.File(rootDir)).inheritIO().start()
 
-        // Wait with timeout (120 seconds)
         if (!process.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)) {
             process.destroyForcibly()
             throw IllegalStateException("iOS device build timed out after 120 seconds - you may need to build once in Xcode first to approve code signing")
@@ -457,7 +424,6 @@ fun buildIosDeviceApp(udid: String) {
         "$rootDir/build/ios-test-derived-data/Build/Products/Debug-iphoneos/iosConnectivityTest.app"
     }
 
-    // Install on device
     val installProcess = ProcessBuilder(
         "xcrun", "devicectl", "device", "install", "app",
         "--device", udid,

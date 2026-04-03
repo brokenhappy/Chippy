@@ -104,10 +104,10 @@ abstract class ProcessRunner(
         // completing the protocol, the error propagates up and cancels all siblings.
         // Once the block completes successfully, we suppress exit code errors because
         // some tools (e.g. devicectl --console) exit with 1 even on clean shutdown.
-        @Volatile var blockCompleted = false
+        val blockCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
         val processMonitor = launch(Dispatchers.IO) {
             val exitCode = process.waitFor()
-            if (exitCode != 0 && !blockCompleted) {
+            if (exitCode != 0 && !blockCompleted.get()) {
                 val stderr = stderrLines.joinToString("\n")
                 error(
                     "[$logPrefix] Process exited with code $exitCode" +
@@ -118,7 +118,7 @@ abstract class ProcessRunner(
 
         try {
             val result = block(toProcess, fromProcess)
-            blockCompleted = true
+            blockCompleted.set(true)
             result
         } finally {
             processMonitor.cancel()

@@ -45,7 +45,6 @@ fun runIosConnectivityTest(
             }
 
             try {
-                // Identify ourselves to the coordinator's accept loop
                 sendControlLine(controlSocket, "HELLO:$instanceId")
 
                 withPeerNetConnection(
@@ -54,7 +53,6 @@ fun runIosConnectivityTest(
                     sendControlLine(controlSocket, "READY")
                     NSLog("[iOS-Test] Sent READY, waiting for START...")
 
-                    // Wait for START from coordinator
                     val startLine = readControlLine(controlSocket)
                     if (startLine != "START") {
                         sendControlLine(controlSocket, "ERROR:Expected START, got: $startLine")
@@ -63,7 +61,6 @@ fun runIosConnectivityTest(
                     }
                     NSLog("[iOS-Test] Received START, beginning discovery")
 
-                    // Monitor state and report discovered platforms
                     val found = mutableSetOf<TestPlatform>()
                     conn.state.first { state ->
                         val matched = matchedPlatforms(state, instanceId, targets)
@@ -89,16 +86,6 @@ fun runIosConnectivityTest(
             onComplete(false, "Error: ${e.message}")
         }
     }
-}
-
-// Keep the old signature for backwards compatibility during transition
-fun runIosConnectivityTest(
-    instanceId: String,
-    platforms: String,
-    onComplete: (success: Boolean, message: String) -> Unit,
-) {
-    NSLog("[iOS-Test] WARNING: No control channel provided, running in legacy mode")
-    onComplete(false, "No control channel — coordinator must pass --control-host/--control-port")
 }
 
 private fun matchedPlatforms(
@@ -143,7 +130,6 @@ private fun connectToControlServer(host: String, port: Int): Int {
         val addr = alloc<sockaddr_in>()
         addr.sin_family = AF_INET.toUByte()
         addr.sin_port = htons(port.toUShort())
-        // Parse IPv4 address manually (inet_pton not available in all K/N interops)
         val parts = host.split(".").map { it.toUByte() }
         if (parts.size == 4) {
             val ipBytes = parts[0].toUInt() or

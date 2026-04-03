@@ -39,29 +39,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         print("[iOS-Test] Starting connectivity test")
         print("[iOS-Test] instanceId=\(instanceId), platforms=\(platforms), control=\(controlHost ?? "none"):\(controlPort)")
 
-        if let host = controlHost, controlPort > 0 {
-            // New: TCP control channel mode
-            IosConnectivityTestKt.runIosConnectivityTest(
-                instanceId: instanceId,
-                platforms: platforms,
-                controlHost: host,
-                controlPort: controlPort
-            ) { success, message in
-                print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    exit(success.boolValue ? 0 : 1)
-                }
-            }
-        } else {
-            // Legacy: no control channel
-            IosConnectivityTestKt.runIosConnectivityTest(
-                instanceId: instanceId,
-                platforms: platforms
-            ) { success, message in
-                print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    exit(success.boolValue ? 0 : 1)
-                }
+        guard let host = controlHost, controlPort > 0 else {
+            print("[iOS-Test] ERROR: --control-host and --control-port are required")
+            exit(1)
+            return true
+        }
+
+        IosConnectivityTestKt.runIosConnectivityTest(
+            instanceId: instanceId,
+            platforms: platforms,
+            controlHost: host,
+            controlPort: controlPort
+        ) { success, message in
+            print("[iOS-Test] Result: success=\(success), message=\(message ?? "nil")")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                exit(success.boolValue ? 0 : 1)
             }
         }
 

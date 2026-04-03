@@ -21,7 +21,9 @@ class ConnectivityTestActivity : Activity() {
         val instanceId = intent.getStringExtra("instanceId") ?: "android-1"
         val platformsStr = intent.getStringExtra("platforms") ?: "jvm,android-simulator"
         val controlHost = intent.getStringExtra("controlHost")
+            ?: error("controlHost intent extra is required")
         val controlPort = intent.getIntExtra("controlPort", 0)
+        require(controlPort > 0) { "controlPort intent extra is required" }
 
         Log.i("ConnectivityTest", "[$instanceId] Starting, control=$controlHost:$controlPort")
 
@@ -29,19 +31,6 @@ class ConnectivityTestActivity : Activity() {
             .mapNotNull { TestPlatform.fromString(it) }
             .toSet()
 
-        if (controlHost != null && controlPort > 0) {
-            runWithControlChannel(instanceId, targets, controlHost, controlPort)
-        } else {
-            runLegacy(instanceId, targets)
-        }
-    }
-
-    private fun runWithControlChannel(
-        instanceId: String,
-        targets: Set<TestPlatform>,
-        controlHost: String,
-        controlPort: Int,
-    ) {
         scope.launch {
             try {
                 val socket = withContext(Dispatchers.IO) {
@@ -51,7 +40,6 @@ class ConnectivityTestActivity : Activity() {
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
                 try {
-                    // Identify ourselves to the coordinator's accept loop
                     writer.println("HELLO:$instanceId")
 
                     withPeerNetConnection(
@@ -92,28 +80,6 @@ class ConnectivityTestActivity : Activity() {
             } catch (e: Exception) {
                 Log.e("ConnectivityTest", "[$instanceId] Error: ${e.message}")
                 setResult(RESULT_CANCELED)
-            }
-            finish()
-        }
-    }
-
-    private fun runLegacy(instanceId: String, targets: Set<TestPlatform>) {
-        val config = ConnectivityTestConfig(
-            instanceId = instanceId,
-            targetPlatforms = targets,
-        )
-
-        scope.launch {
-            val result = runConnectivityTest(config)
-            when (result) {
-                is ConnectivityTestResult.Success -> {
-                    Log.i("ConnectivityTest", "[$instanceId] SUCCESS: Connectivity test passed!")
-                    setResult(RESULT_OK)
-                }
-                is ConnectivityTestResult.Failure -> {
-                    Log.e("ConnectivityTest", "[$instanceId] FAILURE: ${result.message}")
-                    setResult(RESULT_CANCELED)
-                }
             }
             finish()
         }

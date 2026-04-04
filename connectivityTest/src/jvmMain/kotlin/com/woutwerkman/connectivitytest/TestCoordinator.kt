@@ -9,7 +9,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
 
 /**
  * Structured concurrency based test coordinator with bidirectional control channels.
@@ -25,9 +24,9 @@ import kotlin.time.Duration.Companion.seconds
  */
 class TestCoordinator(
     private val platforms: List<PlatformConfig>,
-    private val spinUpTimeout: Duration = 15.seconds,
-    private val discoveryTimeout: Duration = 20.seconds,
-    private val logger: (String) -> Unit = ::println,
+    private val spinUpTimeout: Duration,
+    private val discoveryTimeout: Duration,
+    private val logger: (String) -> Unit,
 ) {
 
     sealed class TestResult {
@@ -84,8 +83,14 @@ class TestCoordinator(
                 // Launch all platforms in parallel.
                 // Each is a child coroutine — if any fails, the scope cancels all siblings.
                 platforms.forEach { platform ->
-                    val otherTypes = platforms.map { it.type }.toSet() - platform.type - TestPlatform.MAC_BLE_HELPER
-                    val targets = otherTypes.map { it.toPlatformString() }
+                    val allTypes = platforms.map { it.type }.toSet() - TestPlatform.MAC_BLE_HELPER
+                    val otherTypes = allTypes - platform.type
+                    // When all instances are the same type, each must still discover a peer
+                    val targets = if (otherTypes.isEmpty()) {
+                        listOf(platform.type.toPlatformString())
+                    } else {
+                        otherTypes.map { it.toPlatformString() }
+                    }
                     launch {
                         platform.runner.run(
                             instanceId = platform.instanceId,
@@ -97,15 +102,20 @@ class TestCoordinator(
                             toProcessChannels[platform.instanceId] = toProcess
 
                             // Wait for READY
+                            var gotReady = false
                             for (line in fromProcess) {
                                 if (line == "READY") {
                                     logger("[${platform.instanceId}] READY")
                                     allReady.send(platform)
+                                    gotReady = true
                                     break
                                 }
                                 if (line.startsWith("ERROR:")) {
                                     error("[${platform.instanceId}] ${line.substringAfter("ERROR:")}")
                                 }
+                            }
+                            if (!gotReady) {
+                                error("[${platform.instanceId}] Disconnected before sending READY")
                             }
 
                             // Wait for DONE
@@ -124,13 +134,22 @@ class TestCoordinator(
                                     }
                                 }
                             }
+                            error("[${platform.instanceId}] Disconnected before sending DONE")
                         }
                     }
                 }
 
                 // Phase 1: Wait for ALL platforms to be ready
-                withTimeout(spinUpTimeout) {
-                    repeat(platforms.size) { allReady.receive() }
+                val readyPlatforms = mutableSetOf<String>()
+                try {
+                    withTimeout(spinUpTimeout) {
+                        repeat(platforms.size) {
+                            readyPlatforms.add(allReady.receive().instanceId)
+                        }
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    val notReady = platforms.map { it.instanceId } - readyPlatforms
+                    error("Spin-up timeout: platforms not ready: ${notReady.joinToString()}")
                 }
                 logger("All ${platforms.size} platforms ready — sending START")
 
@@ -138,8 +157,16 @@ class TestCoordinator(
                 toProcessChannels.values.forEach { it.send("START") }
 
                 // Phase 2: Wait for all DONE (should be fast — everyone is already listening)
-                withTimeout(discoveryTimeout) {
-                    repeat(platforms.size) { allDone.receive() }
+                val donePlatforms = mutableSetOf<String>()
+                try {
+                    withTimeout(discoveryTimeout) {
+                        repeat(platforms.size) {
+                            donePlatforms.add(allDone.receive().instanceId)
+                        }
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    val notDone = platforms.map { it.instanceId } - donePlatforms
+                    error("Discovery timeout: platforms did not finish: ${notDone.joinToString()}")
                 }
 
                 acceptJob.cancel()
@@ -174,8 +201,8 @@ private fun getLocalIpAddress(): String {
         // Prefer non-link-local (169.254.x.x) addresses, and prefer en0 (WiFi)
         candidates
             .filter { !it.first.startsWith("169.254.") }
-            .sortedByDescending { it.second == "en0" }
-            .firstOrNull()?.first
+            .maxByOrNull { it.second == "en0" }
+            ?.first
             ?: candidates.firstOrNull()?.first
             ?: "127.0.0.1"
     } catch (_: Exception) {

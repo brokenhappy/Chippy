@@ -108,7 +108,6 @@ private suspend fun <T> withAndroidPeerTransport(
 
     try {
         return coroutineScope {
-            // Infrastructure coroutines
             launch(Dispatchers.IO) {
                 listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents, localAddress, localPort, peerName)
             }
@@ -116,23 +115,13 @@ private suspend fun <T> withAndroidPeerTransport(
                 processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
             }
             launch {
-                handshakeMaintenance(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
+                retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
             }
             launch {
                 processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, peerName, localAddress, localPort, udpSocket)
             }
-            // mDNS fallback polling
             launch {
-                // Cancellable: delay is a suspension point
-                while (true) {
-                    delay(5.seconds)
-                    try {
-                        val services = jmdns.list(serviceType)
-                        services?.forEach {
-                            discoveryEvents.trySend(DiscoveryEvent.PeerDiscovered(it.name))
-                        }
-                    } catch (_: Exception) {}
-                }
+                pollMdnsAsJmdnsFallback(jmdns, serviceType, discoveryEvents)
             }
 
             try {
@@ -152,19 +141,19 @@ private suspend fun <T> withAndroidPeerTransport(
 }
 
 private fun createUdpSocket(peerId: String): DatagramSocket {
+    fun DatagramSocket.configure() = apply {
+        reuseAddress = true
+        broadcast = true
+        // 100ms receive timeout: makes the blocking receive() return periodically so the
+        // coroutine can check for cancellation. Lower = more responsive shutdown, higher =
+        // less CPU. 100ms is a good balance — cancellation feels instant to humans.
+        soTimeout = 100
+    }
     return try {
-        DatagramSocket(MESSAGE_PORT).apply {
-            reuseAddress = true
-            broadcast = true
-            soTimeout = 100
-        }
+        DatagramSocket(MESSAGE_PORT).configure()
     } catch (e: Exception) {
         println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
-        DatagramSocket(0).apply {
-            reuseAddress = true
-            broadcast = true
-            soTimeout = 100
-        }
+        DatagramSocket(0).configure()
     }
 }
 
@@ -201,6 +190,32 @@ private fun startJmdns(
     return jmdns
 }
 
+/**
+ * JmDNS's passive [ServiceListener] sometimes misses service events on Android, especially
+ * on emulators. This fallback actively queries mDNS to catch anything the listener dropped.
+ *
+ * - 500ms initial delay: gives the passive listener a chance to fire first, avoiding duplicate work
+ *   in the happy path where the listener works fine.
+ * - 5s repeat interval: services don't appear/disappear frequently on a LAN, so aggressive polling
+ *   isn't needed after the initial catch-up. 5s keeps network/CPU overhead negligible.
+ */
+private suspend fun pollMdnsAsJmdnsFallback(
+    jmdns: JmDNS,
+    serviceType: String,
+    discoveryEvents: SendChannel<DiscoveryEvent>,
+) {
+    delay(500.milliseconds)
+    while (true) {
+        try {
+            val services = jmdns.list(serviceType)
+            services?.forEach {
+                discoveryEvents.trySend(DiscoveryEvent.PeerDiscovered(it.name))
+            }
+        } catch (_: Exception) {}
+        delay(5.seconds)
+    }
+}
+
 private suspend fun processDiscoveryEvents(
     events: ReceiveChannel<DiscoveryEvent>,
     peerStates: ConcurrentHashMap<String, PeerState>,
@@ -211,7 +226,6 @@ private suspend fun processDiscoveryEvents(
     localPort: Int,
     udpSocket: DatagramSocket,
 ) {
-    // Cancellable: channel receive is a suspension point
     for (event in events) {
         when (event) {
             is DiscoveryEvent.PeerDiscovered -> {
@@ -262,6 +276,9 @@ private suspend fun processDiscoveryEvents(
                 }
             }
             is DiscoveryEvent.EmulatorProbe -> {
+                // 500ms delay: the emulator NAT needs time to set up the reverse mapping after
+                // receiving inbound traffic. Probing immediately often fails because the NAT
+                // hasn't opened the return path yet.
                 delay(500.milliseconds)
                 sendUdp(udpSocket, event.address, event.port, event.helloPayload)
             }
@@ -269,7 +286,16 @@ private suspend fun processDiscoveryEvents(
     }
 }
 
-private suspend fun handshakeMaintenance(
+/**
+ * Retries HELLO to discovered-but-not-yet-joined peers every 1 second. UDP is unreliable, so
+ * the first HELLO (sent immediately on mDNS discovery) may be lost. 1s strikes a balance: fast
+ * enough that a single dropped packet only adds 1s of latency, slow enough to avoid flooding
+ * the network when multiple peers are discovering simultaneously.
+ *
+ * On Android emulators (10.0.2.15), also probes the host gateway (10.0.2.2) since mDNS doesn't
+ * cross the emulator NAT — this is the only way to discover the host JVM peer.
+ */
+private suspend fun retryUnacknowledgedHandshakes(
     peerStates: ConcurrentHashMap<String, PeerState>,
     peerId: String,
     peerName: String,
@@ -277,11 +303,9 @@ private suspend fun handshakeMaintenance(
     localPort: Int,
     udpSocket: DatagramSocket,
 ) {
-    // Cancellable: delay is a suspension point
     while (true) {
         delay(1.seconds)
 
-        // Emulator-to-Host proactive discovery
         if (localAddress == "10.0.2.15") {
             sendUdp(udpSocket, "10.0.2.2", MESSAGE_PORT, "$peerId:$HANDSHAKE_HELLO$peerName|$peerId|$localAddress|$localPort")
         }
@@ -308,7 +332,6 @@ private suspend fun listenForMessages(
     peerName: String,
 ) {
     val buffer = ByteArray(65535)
-    // Cancellable: withContext is a suspension point that checks for cancellation
     while (true) {
         try {
             val packet = DatagramPacket(buffer, buffer.size)
@@ -339,7 +362,7 @@ private suspend fun listenForMessages(
                 }
             }
         } catch (_: SocketTimeoutException) {
-            // Normal timeout
+            // Expected: soTimeout (100ms) fires to allow cancellation checks
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -442,7 +465,6 @@ private suspend fun processOutgoingCommands(
     peerStates: ConcurrentHashMap<String, PeerState>,
     udpSocket: DatagramSocket,
 ) {
-    // Cancellable: channel receive is a suspension point
     for (command in outgoingChannel) {
         when (command) {
             is PeerCommand.SendTo -> {

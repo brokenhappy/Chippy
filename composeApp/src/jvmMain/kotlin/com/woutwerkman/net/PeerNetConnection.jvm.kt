@@ -113,7 +113,6 @@ private suspend fun <T> withJvmPeerTransport(
 
     try {
         return coroutineScope {
-            // Infrastructure coroutines
             launch(Dispatchers.IO) {
                 listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
             }
@@ -121,7 +120,7 @@ private suspend fun <T> withJvmPeerTransport(
                 processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
             }
             launch {
-                handshakeMaintenance(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
+                retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
             }
             launch {
                 processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId)
@@ -156,19 +155,19 @@ private suspend fun <T> withJvmPeerTransport(
 }
 
 private fun createUdpSocket(peerId: String): DatagramSocket {
+    fun DatagramSocket.configure() = apply {
+        reuseAddress = true
+        broadcast = true
+        // 100ms receive timeout: makes the blocking receive() return periodically so the
+        // coroutine can check for cancellation. Lower = more responsive shutdown, higher =
+        // less CPU. 100ms is a good balance — cancellation feels instant to humans.
+        soTimeout = 100
+    }
     return try {
-        DatagramSocket(MESSAGE_PORT).apply {
-            reuseAddress = true
-            broadcast = true
-            soTimeout = 100
-        }
+        DatagramSocket(MESSAGE_PORT).configure()
     } catch (e: Exception) {
         println("[PeerNet-$peerId] MESSAGE_PORT $MESSAGE_PORT busy, using random port")
-        DatagramSocket(0).apply {
-            reuseAddress = true
-            broadcast = true
-            soTimeout = 100
-        }
+        DatagramSocket(0).configure()
     }
 }
 
@@ -215,7 +214,6 @@ private suspend fun processDiscoveryEvents(
     incomingChannel: SendChannel<RawPeerMessage>,
     peerId: String,
 ) {
-    // Cancellable: channel receive is a suspension point
     for (event in events) {
         when (event) {
             is DiscoveryEvent.PeerDiscovered -> {
@@ -270,9 +268,12 @@ private suspend fun processDiscoveryEvents(
 }
 
 /**
- * Periodically sends HELLOs to peers we've discovered but haven't completed handshake with.
+ * Retries HELLO to discovered-but-not-yet-joined peers every 1 second. UDP is unreliable, so
+ * the first HELLO (sent immediately on mDNS discovery) may be lost. 1s strikes a balance: fast
+ * enough that a single dropped packet only adds 1s of latency, slow enough to avoid flooding
+ * the network when multiple peers are discovering simultaneously.
  */
-private suspend fun handshakeMaintenance(
+private suspend fun retryUnacknowledgedHandshakes(
     peerStates: ConcurrentHashMap<String, PeerState>,
     peerId: String,
     peerName: String,
@@ -280,7 +281,6 @@ private suspend fun handshakeMaintenance(
     localPort: Int,
     udpSocket: DatagramSocket,
 ) {
-    // Cancellable: delay is a suspension point
     while (true) {
         delay(1.seconds)
 
@@ -305,7 +305,6 @@ private suspend fun listenForMessages(
     val buffer = ByteArray(65535)
     println("[PeerNet-$peerId] Listening for messages on port ${udpSocket.localPort}")
 
-    // Cancellable: withContext is a suspension point that checks for cancellation
     while (true) {
         try {
             val packet = DatagramPacket(buffer, buffer.size)
@@ -344,7 +343,7 @@ private suspend fun listenForMessages(
                 }
             }
         } catch (_: java.net.SocketTimeoutException) {
-            // Normal timeout, continue polling
+            // Expected: soTimeout (100ms) fires to allow cancellation checks
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -457,7 +456,6 @@ private suspend fun processOutgoingCommands(
     peerStates: ConcurrentHashMap<String, PeerState>,
     udpSocket: DatagramSocket,
 ) {
-    // Cancellable: channel receive is a suspension point
     for (command in outgoingChannel) {
         when (command) {
             is PeerCommand.SendTo -> {

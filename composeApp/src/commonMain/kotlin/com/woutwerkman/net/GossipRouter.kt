@@ -199,7 +199,11 @@ internal suspend fun gossipRouter(
         }
     }
 
-    // Periodic state sync + reachability announce
+    // Periodic state sync + reachability announce.
+    // 2s interval: frequent enough for peers to converge on a shared event log within a few
+    // seconds of joining, infrequent enough that the gossip traffic stays small relative to
+    // actual application data. This also serves as a keep-alive — if a peer silently disappears,
+    // we'll notice within one reachability cycle.
     launch {
         while (currentCoroutineContext().isActive) {
             delay(2.seconds)

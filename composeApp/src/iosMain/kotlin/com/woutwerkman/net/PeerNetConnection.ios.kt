@@ -171,7 +171,6 @@ private suspend fun <T> withIosPeerTransport(
                 receiveLoop(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
             }
             launch {
-                // Cancellable: channel receive is a suspension point
                 for (command in outgoingChannel) {
                     handleCommand(command, peerId, peerStates, bleSendToPeer)
                 }
@@ -179,23 +178,8 @@ private suspend fun <T> withIosPeerTransport(
             launch {
                 processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, config.displayName, localAddress, boundPort)
             }
-            // Handshake maintenance + RunLoop processing
             launch {
-                // Cancellable: delay is a suspension point
-                while (true) {
-                    withContext(Dispatchers.Main) {
-                        NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
-                    }
-
-                    delay(50.milliseconds)
-
-                    peerStates.snapshot().forEach { (pId, state) ->
-                        if (state.weSeeThemViaDiscovery && !state.isJoined && state.info.port > 0) {
-                            sendHandshakeHello(peerId, config.displayName, localAddress, boundPort, state.info)
-                            peerStates.update(pId) { it.copy(weSentHello = true) }
-                        }
-                    }
-                }
+                driveRunLoopAndRetryHandshakes(peerStates, peerId, config.displayName, localAddress, boundPort)
             }
             // BLE transport — discovery + data fallback
             launch {
@@ -280,6 +264,8 @@ private fun startBonjour(
             }
             resolverDelegates.add(resolveDelegate)
             service.delegate = resolveDelegate
+            // 5s is Apple's recommended max timeout. Typical resolution on LAN is <500ms.
+            // This is a safety net, not the expected duration.
             service.resolveWithTimeout(5.0)
         }
     )
@@ -294,6 +280,38 @@ private fun startBonjour(
     return BonjourState(service = netService, browser = netServiceBrowser)
 }
 
+/**
+ * Combined RunLoop driver and handshake retry loop.
+ *
+ * iOS Bonjour (NSNetService) requires the main RunLoop to be pumped for delegate callbacks to
+ * fire. We drive it in 50ms increments — fast enough for responsive discovery, slow enough to
+ * not burn CPU. We also retry handshakes in the same loop since the 50ms cadence is more
+ * aggressive than the 1s retry on other platforms, compensating for iOS's more complex
+ * discovery path (Bonjour resolve + BLE).
+ */
+private suspend fun driveRunLoopAndRetryHandshakes(
+    peerStates: AtomicPeerStates,
+    peerId: String,
+    displayName: String,
+    localAddress: String,
+    boundPort: Int,
+) {
+    while (true) {
+        withContext(Dispatchers.Main) {
+            NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
+        }
+
+        delay(50.milliseconds)
+
+        peerStates.snapshot().forEach { (pId, state) ->
+            if (state.weSeeThemViaDiscovery && !state.isJoined && state.info.port > 0) {
+                sendHandshakeHello(peerId, displayName, localAddress, boundPort, state.info)
+                peerStates.update(pId) { it.copy(weSentHello = true) }
+            }
+        }
+    }
+}
+
 private suspend fun processDiscoveryEvents(
     events: ReceiveChannel<DiscoveryEvent>,
     peerStates: AtomicPeerStates,
@@ -303,7 +321,6 @@ private suspend fun processDiscoveryEvents(
     localAddress: String,
     boundPort: Int,
 ) {
-    // Cancellable: channel receive is a suspension point
     for (event in events) {
         when (event) {
             is DiscoveryEvent.ServiceResolved -> {
@@ -419,7 +436,6 @@ private suspend fun receiveLoop(
     val buffer = ByteArray(4096)
     var loopCount = 0
 
-    // Cancellable: delay is a suspension point
     while (true) {
         loopCount++
         if (loopCount % 100 == 0) {
@@ -473,6 +489,9 @@ private suspend fun receiveLoop(
                 }
             }
         }
+        // 10ms polling interval: the socket is non-blocking (O_NONBLOCK), so recvfrom returns
+        // immediately when no data is available. Without this delay we'd spin at 100% CPU.
+        // 10ms keeps latency imperceptible while being cheap.
         delay(10.milliseconds)
     }
 }

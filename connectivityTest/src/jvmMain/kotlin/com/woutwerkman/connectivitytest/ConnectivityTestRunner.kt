@@ -57,10 +57,16 @@ suspend fun runStructuredConnectivityTest(
     println("Testing platforms: ${availablePlatforms.joinToString(", ") { it.type.toString() }}")
     println()
 
+    // BLE discovery adds overhead: scan (2-5s) + connect + read characteristic (3-5s).
+    // LAN-only worst case is ~10s: mDNS propagation (1-2s) + Android fallback poll (5s)
+    //   + iOS resolveWithTimeout (5s) + handshake retries (1-3s at 1s intervals).
+    // DO NOT change these timeouts without understanding the full discovery chain.
+    // Each delay is documented in the PeerNetConnection platform files.
+    val hasBle = availablePlatforms.any { it.type == TestPlatform.MAC_BLE_HELPER }
     val coordinator = TestCoordinator(
         platforms = availablePlatforms,
         spinUpTimeout = 15.seconds,
-        discoveryTimeout = 20.seconds,
+        discoveryTimeout = if (hasBle) 20.seconds else 12.seconds,
         logger = ::println,
     )
 

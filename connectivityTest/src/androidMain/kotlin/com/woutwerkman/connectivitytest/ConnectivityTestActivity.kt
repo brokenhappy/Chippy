@@ -40,9 +40,9 @@ class ConnectivityTestActivity : ComponentActivity() {
 
         Log.i("ConnectivityTest", "[$instanceId] Starting, control=$controlHost:$controlPort")
 
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             try {
-                val socket = withContext(Dispatchers.IO) { Socket(controlHost, controlPort) }
+                val socket = Socket(controlHost, controlPort)
                 val writer = PrintWriter(socket.getOutputStream(), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
@@ -53,26 +53,26 @@ class ConnectivityTestActivity : ComponentActivity() {
                     targets = targets,
                     uiState = uiState,
                     sendLine = { line ->
-                        withContext(Dispatchers.IO) { writer.println(line) }
+                        writer.println(line)
                         Log.i("ConnectivityTest", "[$instanceId] Sent: $line")
                     },
                     readLine = {
-                        withContext(Dispatchers.IO) { reader.readLine() }.also {
+                        reader.readLine().also {
                             Log.i("ConnectivityTest", "[$instanceId] Received: $it")
                         }
                     },
                 )
 
                 Log.i("ConnectivityTest", "[$instanceId] SUCCESS!")
-                setResult(RESULT_OK)
-                withContext(Dispatchers.IO) { socket.close() }
+                withContext(Dispatchers.Main) { setResult(RESULT_OK) }
+                socket.close()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e("ConnectivityTest", "[$instanceId] Error: ${e.message}")
-                setResult(RESULT_CANCELED)
+                Log.e("ConnectivityTest", "[$instanceId] Error: ${e::class.simpleName}: ${e.message}", e)
+                withContext(Dispatchers.Main) { setResult(RESULT_CANCELED) }
             }
-            finish()
+            withContext(Dispatchers.Main) { finish() }
         }
     }
 

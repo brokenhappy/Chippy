@@ -395,9 +395,13 @@ private fun handleHelloReceived(
         pPort = fromPort
     }
 
-    // If we are an emulator and the peer is not, probe via 10.0.2.2
+    // If we are an emulator and the peer is not, route via the host gateway (10.0.2.2).
+    // The peer's self-reported address (e.g. 192.168.178.x) is unreachable from inside the
+    // emulator NAT. We must use 10.0.2.2 for ALL communication with this peer — including
+    // the stored address (for ACKs) and the discovery probe.
     if (localAddress == "10.0.2.15" && !pAddr.startsWith("10.0.2.") && pAddr != "127.0.0.1") {
-        println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Adding 10.0.2.2 as alternative.")
+        println("[PeerNet-$peerId] We are emulator, peer is $pAddr. Routing via 10.0.2.2:$pPort")
+        pAddr = "10.0.2.2"
         discoveryEvents.trySend(
             DiscoveryEvent.EmulatorProbe(
                 address = "10.0.2.2",

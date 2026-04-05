@@ -2,19 +2,15 @@ package com.woutwerkman.connectivitytest
 
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.application
+import androidx.compose.ui.window.awaitApplication
 import androidx.compose.ui.window.rememberWindowState
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 
-/**
- * Shows a Compose Desktop window for the connectivity test.
- * Blocks until the window is closed or [parentJob] completes.
- */
-fun showConnectivityTestWindow(uiState: StateFlow<ConnectivityTestUiState>, parentJob: Job) {
-    application {
-        parentJob.invokeOnCompletion { exitApplication() }
-
+/** Shows a Compose Desktop window for the connectivity test. Suspends until closed or cancelled. */
+suspend fun showConnectivityTestWindow(
+    uiState: StateFlow<ConnectivityTestUiState>,
+) {
+    awaitApplication {
         Window(
             onCloseRequest = ::exitApplication,
             title = "Connectivity Test",

@@ -14,18 +14,18 @@ import kotlin.time.Duration.Companion.seconds
  * If no platforms specified, auto-detects available platforms.
  */
 fun main(args: Array<String>) {
-    val requestedPlatforms = if (args.isEmpty()) {
-        emptyList()
-    } else {
-        args[0].split(",").map { it.trim() }
-    }
+    val noHeadless = args.contains("--no-headless")
+    val requestedPlatforms = args.filterNot { it.startsWith("--") }
+        .flatMap { it.split(",") }
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
 
     println("=".repeat(80))
     println("Chippy Connectivity Test")
     println("=".repeat(80))
 
     val result = runBlocking {
-        runStructuredConnectivityTest(requestedPlatforms)
+        runStructuredConnectivityTest(requestedPlatforms, showJvmUi = noHeadless)
     }
 
     when (result) {
@@ -46,9 +46,10 @@ fun main(args: Array<String>) {
 }
 
 suspend fun runStructuredConnectivityTest(
-    requestedPlatforms: List<String>
+    requestedPlatforms: List<String>,
+    showJvmUi: Boolean = false,
 ): TestResult {
-    val availablePlatforms = detectAvailablePlatforms(requestedPlatforms)
+    val availablePlatforms = detectAvailablePlatforms(requestedPlatforms, showJvmUi = showJvmUi)
 
     if (availablePlatforms.isEmpty()) {
         return TestResult.Failure("No platforms available for testing")
@@ -74,7 +75,7 @@ suspend fun runStructuredConnectivityTest(
 /**
  * Detect which platforms are available and create configs for them.
  */
-fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
+fun detectAvailablePlatforms(requested: List<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
     val platformsToCheck = requested.ifEmpty {
         listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
@@ -172,7 +173,7 @@ fun detectAvailablePlatforms(requested: List<String>): List<PlatformConfig> {
                 PlatformConfig(
                     type = TestPlatform.JVM,
                     instanceId = "jvm-${i + 1}",
-                    runner = JvmLauncher(),
+                    runner = JvmLauncher(showUi = showJvmUi),
                 )
             )
         }
@@ -334,7 +335,7 @@ fun buildIosSimulatorApp(udid: String) {
 
     var process = ProcessBuilder(
         "$rootDir/gradlew",
-        ":composeApp:linkDebugFrameworkIosSimulatorArm64",
+        ":connectivityTest:linkDebugFrameworkIosSimulatorArm64",
         "--no-configuration-cache",
         "-q"
     ).directory(java.io.File(rootDir)).inheritIO().start()
@@ -351,7 +352,7 @@ fun buildIosSimulatorApp(udid: String) {
         "-sdk", "iphonesimulator",
         "-arch", "arm64",
         "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
-        "FRAMEWORK_SEARCH_PATHS=$rootDir/composeApp/build/bin/iosSimulatorArm64/debugFramework",
+        "FRAMEWORK_SEARCH_PATHS=$rootDir/connectivityTest/build/bin/iosSimulatorArm64/debugFramework",
         "build"
     ).directory(java.io.File(rootDir)).inheritIO().start()
 
@@ -376,7 +377,7 @@ fun buildIosDeviceApp(udid: String) {
 
     var process = ProcessBuilder(
         "$rootDir/gradlew",
-        ":composeApp:linkDebugFrameworkIosArm64",
+        ":connectivityTest:linkDebugFrameworkIosArm64",
         "--no-configuration-cache",
         "-q"
     ).directory(java.io.File(rootDir)).inheritIO().start()
@@ -385,11 +386,11 @@ fun buildIosDeviceApp(udid: String) {
         throw IllegalStateException("Failed to build Kotlin framework for iOS device")
     }
 
-    val simFrameworkDir = java.io.File("$rootDir/composeApp/build/bin/iosSimulatorArm64/debugFramework")
-    val simFramework = java.io.File(simFrameworkDir, "ComposeApp.framework")
+    val simFrameworkDir = java.io.File("$rootDir/connectivityTest/build/bin/iosSimulatorArm64/debugFramework")
+    val simFramework = java.io.File(simFrameworkDir, "ConnectivityTest.framework")
     if (!simFramework.exists()) {
         simFrameworkDir.mkdirs()
-        val deviceFramework = java.io.File("$rootDir/composeApp/build/bin/iosArm64/debugFramework/ComposeApp.framework")
+        val deviceFramework = java.io.File("$rootDir/connectivityTest/build/bin/iosArm64/debugFramework/ConnectivityTest.framework")
         ProcessBuilder("ln", "-s", deviceFramework.absolutePath, simFramework.absolutePath).start().waitFor()
     }
 
@@ -412,7 +413,7 @@ fun buildIosDeviceApp(udid: String) {
             "-arch", "arm64",
             "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
             "-allowProvisioningUpdates",
-            "FRAMEWORK_SEARCH_PATHS=$rootDir/composeApp/build/bin/iosArm64/debugFramework",
+            "FRAMEWORK_SEARCH_PATHS=$rootDir/connectivityTest/build/bin/iosArm64/debugFramework",
             "build"
         ).directory(java.io.File(rootDir)).inheritIO().start()
 

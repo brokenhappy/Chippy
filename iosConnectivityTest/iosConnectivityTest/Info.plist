@@ -35,6 +35,8 @@
     <array>
         <string>UIInterfaceOrientationPortrait</string>
     </array>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Used for peer-to-peer connectivity testing</string>
     <key>NSBonjourServices</key>

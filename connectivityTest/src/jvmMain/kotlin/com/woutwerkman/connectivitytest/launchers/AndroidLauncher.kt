@@ -48,8 +48,7 @@ class AndroidLauncher(
         // Launch the app with control channel args as intent extras
         val launchResult = ProcessBuilder(
             "adb", "-s", emulatorId, "shell",
-            "am start -n com.woutwerkman/.MainActivity " +
-                    "--ez connectivity_test true " +
+            "am start -n com.woutwerkman/.ConnectivityTestActivity " +
                     "--es instanceId $instanceId " +
                     "--es platforms ${targets.joinToString(",")} " +
                     "--es controlHost $effectiveControlHost " +

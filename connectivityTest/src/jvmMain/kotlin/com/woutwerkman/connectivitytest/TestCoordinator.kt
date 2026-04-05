@@ -1,6 +1,5 @@
 package com.woutwerkman.connectivitytest
 
-import com.woutwerkman.net.TestPlatform
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel

@@ -8,8 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		AAAAAA0001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAAAA0002; };
-		AAAAAA0003 /* ComposeApp.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AAAAAA0004; };
-		AAAAAA0005 /* ComposeApp.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AAAAAA0004; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		AAAAAA0003 /* ConnectivityTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AAAAAA0004; };
+		AAAAAA0005 /* ConnectivityTest.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AAAAAA0004; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -19,7 +19,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				AAAAAA0005 /* ComposeApp.framework in Embed Frameworks */,
+				AAAAAA0005 /* ConnectivityTest.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -28,7 +28,7 @@
 
 /* Begin PBXFileReference section */
 		AAAAAA0002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		AAAAAA0004 /* ComposeApp.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ComposeApp.framework; path = "../composeApp/build/bin/iosSimulatorArm64/debugFramework/ComposeApp.framework"; sourceTree = "<group>"; };
+		AAAAAA0004 /* ConnectivityTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ConnectivityTest.framework; path = "../connectivityTest/build/bin/iosSimulatorArm64/debugFramework/ConnectivityTest.framework"; sourceTree = "<group>"; };
 		AAAAAA0007 /* iosConnectivityTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iosConnectivityTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AAAAAA0008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -38,7 +38,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AAAAAA0003 /* ComposeApp.framework in Frameworks */,
+				AAAAAA0003 /* ConnectivityTest.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,18 +74,41 @@
 		AAAAAA0013 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				AAAAAA0004 /* ComposeApp.framework */,
+				AAAAAA0004 /* ConnectivityTest.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		AAAAAA0030 /* Compile Kotlin Framework */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Compile Kotlin Framework";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"YES\" = \"$OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED\" ]; then\n  echo \"Skipping Gradle build task invocation due to OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED environment variable set to \\\"YES\\\"\"\n  exit 0\nfi\ncd \"$SRCROOT/..\"\n./gradlew :connectivityTest:embedAndSignAppleFrameworkForXcode\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXNativeTarget section */
 		AAAAAA0014 /* iosConnectivityTest */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = AAAAAA0015;
 			buildPhases = (
+				AAAAAA0030 /* Compile Kotlin Framework */,
 				AAAAAA0016 /* Sources */,
 				AAAAAA0009 /* Frameworks */,
 				AAAAAA0006 /* Embed Frameworks */,
@@ -198,8 +221,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = NNWGJ472UA;
-				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/debugFramework";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../composeApp/build/bin/iosArm64/debugFramework";
+				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/../connectivityTest/build/bin/iosSimulatorArm64/debugFramework";
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../connectivityTest/build/bin/iosArm64/debugFramework";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = iosConnectivityTest/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -212,7 +235,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
-					ComposeApp,
+					ConnectivityTest,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.woutwerkman.ChippyConnectivityTest;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -229,8 +252,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = NNWGJ472UA;
-				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/debugFramework";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../composeApp/build/bin/iosArm64/debugFramework";
+				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/../connectivityTest/build/bin/iosSimulatorArm64/debugFramework";
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../connectivityTest/build/bin/iosArm64/debugFramework";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = iosConnectivityTest/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -243,7 +266,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
-					ComposeApp,
+					ConnectivityTest,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.woutwerkman.ChippyConnectivityTest;
 				PRODUCT_NAME = "$(TARGET_NAME)";

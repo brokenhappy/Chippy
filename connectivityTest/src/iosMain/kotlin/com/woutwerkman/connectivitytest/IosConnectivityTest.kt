@@ -1,9 +1,9 @@
-package com.woutwerkman
+package com.woutwerkman.connectivitytest
 
-import com.woutwerkman.net.*
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import platform.Foundation.NSLog
 import platform.posix.*
 
@@ -12,7 +12,7 @@ private fun htons(value: UShort): UShort =
 
 /**
  * Entry point for iOS connectivity test with TCP control channel.
- * Called from Swift AppDelegate.
+ * Called from Swift AppDelegate. Returns a StateFlow for the Compose UI.
  */
 fun runIosConnectivityTest(
     instanceId: String,
@@ -20,17 +20,24 @@ fun runIosConnectivityTest(
     controlHost: String,
     controlPort: Int,
     onComplete: (success: Boolean, message: String) -> Unit,
-) {
-    NSLog("[iOS-Test] Starting: instanceId=$instanceId, platforms=$platforms, control=$controlHost:$controlPort")
-
+): StateFlow<ConnectivityTestUiState> {
     val targets = platforms.split(",")
         .mapNotNull { TestPlatform.fromString(it.trim()) }
         .toSet()
 
+    val uiState = MutableStateFlow(
+        ConnectivityTestUiState(
+            instanceId = instanceId,
+            targets = targets.associateWith { false },
+        )
+    )
+
     if (targets.isEmpty()) {
         onComplete(false, "No valid platforms: $platforms")
-        return
+        return uiState
     }
+
+    NSLog("[iOS-Test] Starting: instanceId=$instanceId, platforms=$platforms, control=$controlHost:$controlPort")
 
     // Must use GlobalScope — called from AppDelegate which has no coroutine parent.
     // The iOS app process lifetime is managed by the coordinator; when coordinator
@@ -47,35 +54,23 @@ fun runIosConnectivityTest(
             try {
                 sendControlLine(controlSocket, "HELLO:$instanceId")
 
-                withPeerNetConnection(
-                    PeerNetConfig(serviceName = "chippy-test", displayName = instanceId)
-                ) { conn ->
-                    sendControlLine(controlSocket, "READY")
-                    NSLog("[iOS-Test] Sent READY, waiting for START...")
-
-                    val startLine = readControlLine(controlSocket)
-                    if (startLine != "START") {
-                        sendControlLine(controlSocket, "ERROR:Expected START, got: $startLine")
-                        onComplete(false, "Expected START, got: $startLine")
-                        return@withPeerNetConnection
-                    }
-                    NSLog("[iOS-Test] Received START, beginning discovery")
-
-                    val found = mutableSetOf<TestPlatform>()
-                    conn.state.first { state ->
-                        val matched = matchedPlatforms(state, instanceId, targets)
-                        for (p in matched - found) {
-                            found.add(p)
-                            sendControlLine(controlSocket, "FOUND:${p.toPlatformString()}")
-                            NSLog("[iOS-Test] Found ${p.toPlatformString()}")
+                runConnectivityTestProtocol(
+                    instanceId = instanceId,
+                    targets = targets,
+                    uiState = uiState,
+                    sendLine = { line ->
+                        sendControlLine(controlSocket, line)
+                        NSLog("[iOS-Test] Sent: $line")
+                    },
+                    readLine = {
+                        readControlLine(controlSocket).also {
+                            NSLog("[iOS-Test] Received: $it")
                         }
-                        found.containsAll(targets)
-                    }
+                    },
+                )
 
-                    sendControlLine(controlSocket, "DONE")
-                    NSLog("[iOS-Test] SUCCESS! All platforms found")
-                    onComplete(true, "All platforms connected")
-                }
+                NSLog("[iOS-Test] SUCCESS!")
+                onComplete(true, "All platforms connected")
             } finally {
                 close(controlSocket)
             }
@@ -86,34 +81,8 @@ fun runIosConnectivityTest(
             onComplete(false, "Error: ${e.message}")
         }
     }
-}
 
-private fun matchedPlatforms(
-    state: PeerNetState,
-    instanceId: String,
-    targets: Set<TestPlatform>,
-): Set<TestPlatform> {
-    val matched = mutableSetOf<TestPlatform>()
-    for ((peerId, peer) in state.discoveredPeers) {
-        if (peer.name == instanceId) continue
-        val platform = TestPlatform.fromPeerId(peerId) ?: continue
-        val normalized = normalizePlatform(platform, targets)
-        if (normalized != null) matched.add(normalized)
-    }
-    return matched
-}
-
-private fun normalizePlatform(platform: TestPlatform, targets: Set<TestPlatform>): TestPlatform? {
-    if (platform in targets) return platform
-    if (platform == TestPlatform.IOS_REAL_DEVICE || platform == TestPlatform.IOS_SIMULATOR) {
-        if (TestPlatform.IOS_REAL_DEVICE in targets) return TestPlatform.IOS_REAL_DEVICE
-        if (TestPlatform.IOS_SIMULATOR in targets) return TestPlatform.IOS_SIMULATOR
-    }
-    if (platform == TestPlatform.ANDROID_REAL_DEVICE || platform == TestPlatform.ANDROID_SIMULATOR) {
-        if (TestPlatform.ANDROID_REAL_DEVICE in targets) return TestPlatform.ANDROID_REAL_DEVICE
-        if (TestPlatform.ANDROID_SIMULATOR in targets) return TestPlatform.ANDROID_SIMULATOR
-    }
-    return null
+    return uiState
 }
 
 // --- TCP Control Channel (POSIX sockets) ---

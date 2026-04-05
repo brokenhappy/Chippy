@@ -4,6 +4,8 @@ import java.time.Duration
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.composeMultiplatform)
+    alias(libs.plugins.composeCompiler)
 }
 
 @Suppress("DEPRECATION")
@@ -16,17 +18,33 @@ kotlin {
 
     jvm()
 
+    listOf(
+        iosArm64(),
+        iosSimulatorArm64()
+    ).forEach { iosTarget ->
+        iosTarget.binaries.framework {
+            baseName = "ConnectivityTest"
+            isStatic = true
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             implementation(project(":composeApp"))
             implementation(libs.kotlinx.coroutines.core)
+            implementation(compose.runtime)
+            implementation(compose.foundation)
+            implementation(compose.material3)
+            implementation(compose.ui)
         }
 
         jvmMain.dependencies {
             implementation(libs.kotlinx.coroutinesSwing)
+            implementation(compose.desktop.currentOs)
         }
 
         androidMain.dependencies {
+            implementation(libs.androidx.activity.compose)
         }
     }
 }
@@ -49,7 +67,7 @@ android {
 // Connectivity Test Task
 // ============================================================================
 
-tasks.register<JavaExec>("testConnectibility") {
+tasks.register<JavaExec>("testConnectivity") {
     group = "verification"
     description = "Test network connectivity between platforms"
 
@@ -64,6 +82,10 @@ tasks.register<JavaExec>("testConnectibility") {
     val platformsArg = project.findProperty("platforms")?.toString() ?: ""
     if (platformsArg.isNotEmpty()) {
         args(platformsArg)
+    }
+
+    if (project.hasProperty("no-headless")) {
+        args("--no-headless")
     }
 
     dependsOn(":connectivityTest:jvmMainClasses")

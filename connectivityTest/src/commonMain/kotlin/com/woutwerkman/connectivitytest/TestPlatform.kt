@@ -1,4 +1,4 @@
-package com.woutwerkman.net
+package com.woutwerkman.connectivitytest
 
 /**
  * Platform identifiers for connectivity testing.

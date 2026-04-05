@@ -1,19 +1,11 @@
 import UIKit
-import ComposeApp
-
-// Minimal iOS app that runs connectivity test on launch and exits
-// No UI, just runs the test in the background
+import ConnectivityTest
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Create minimal window (required for app to run)
-        window = UIWindow(frame: UIScreen.main.bounds)
-        window?.rootViewController = UIViewController()
-        window?.makeKeyAndVisible()
-
         // Parse arguments
         let args = CommandLine.arguments
         var instanceId = "ios-\(Int(Date().timeIntervalSince1970 * 1000) % 100000000)"
@@ -45,7 +37,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             return true
         }
 
-        IosConnectivityTestKt.runIosConnectivityTest(
+        let uiState = IosConnectivityTestKt.runIosConnectivityTest(
             instanceId: instanceId,
             platforms: platforms,
             controlHost: host,
@@ -56,6 +48,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 exit(success.boolValue ? 0 : 1)
             }
         }
+
+        window = UIWindow(frame: UIScreen.main.bounds)
+        window?.rootViewController = ConnectivityTestViewControllerKt.ConnectivityTestViewController(uiState: uiState)
+        window?.makeKeyAndVisible()
 
         return true
     }

@@ -35,7 +35,8 @@ class JvmLauncher(
         )
 
         if (showUi) {
-            launch(Dispatchers.Default) { showConnectivityTestWindow(uiState) }
+            val parentJob = coroutineContext[Job]!!
+            launch(Dispatchers.Default) { showConnectivityTestWindow(uiState, parentJob) }
         }
 
         launch {

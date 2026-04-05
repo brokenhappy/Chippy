@@ -37,9 +37,7 @@ class ConnectivityTestActivity : Activity() {
                     Socket(controlHost, controlPort)
                 }
                 val writer = PrintWriter(socket.getOutputStream(), true)
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-
-                try {
+                BufferedReader(InputStreamReader(socket.getInputStream())).use { reader ->
                     writer.println("HELLO:$instanceId")
 
                     withPeerNetConnection(
@@ -69,10 +67,6 @@ class ConnectivityTestActivity : Activity() {
                         writer.println("DONE")
                         Log.i("ConnectivityTest", "[$instanceId] SUCCESS!")
                         setResult(RESULT_OK)
-                    }
-                } finally {
-                    withContext(Dispatchers.IO + NonCancellable) {
-                        socket.close()
                     }
                 }
             } catch (e: CancellationException) {

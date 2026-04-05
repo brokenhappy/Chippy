@@ -7,7 +7,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.flow.first
-import java.net.Socket
 
 /**
  * In-process JVM runner. Uses direct Kotlin channels (no TCP).
@@ -20,9 +19,6 @@ class JvmLauncher(
     override suspend fun <T> run(
         instanceId: String,
         targets: List<String>,
-        controlHost: String,
-        controlPort: Int,
-        socketDeferred: CompletableDeferred<Socket>?,
         block: suspend (toProcess: SendChannel<String>, fromProcess: ReceiveChannel<String>) -> T,
     ): T = coroutineScope {
         val toProcess = Channel<String>(Channel.BUFFERED)

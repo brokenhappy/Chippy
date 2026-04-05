@@ -29,13 +29,13 @@ fun main(args: Array<String>) {
     }
 
     when (result) {
-        is TestCoordinator.TestResult.Success -> {
+        is TestResult.Success -> {
             println("\n" + "=".repeat(80))
             println("SUCCESS: All platforms connected!")
             println("=".repeat(80))
             exitProcess(0)
         }
-        is TestCoordinator.TestResult.Failure -> {
+        is TestResult.Failure -> {
             System.err.println("\n" + "=".repeat(80))
             System.err.println("FAILURE: ${result.message}")
             result.cause?.printStackTrace()
@@ -47,30 +47,28 @@ fun main(args: Array<String>) {
 
 suspend fun runStructuredConnectivityTest(
     requestedPlatforms: List<String>
-): TestCoordinator.TestResult {
+): TestResult {
     val availablePlatforms = detectAvailablePlatforms(requestedPlatforms)
 
     if (availablePlatforms.isEmpty()) {
-        return TestCoordinator.TestResult.Failure("No platforms available for testing")
+        return TestResult.Failure("No platforms available for testing")
     }
 
     println("Testing platforms: ${availablePlatforms.joinToString(", ") { it.type.toString() }}")
     println()
 
-    // BLE discovery adds overhead: scan (2-5s) + connect + read characteristic (3-5s).
-    // LAN-only worst case is ~10s: mDNS propagation (1-2s) + Android fallback poll (5s)
-    //   + iOS resolveWithTimeout (5s) + handshake retries (1-3s at 1s intervals).
-    // DO NOT change these timeouts without understanding the full discovery chain.
-    // Each delay is documented in the PeerNetConnection platform files.
     val hasBle = availablePlatforms.any { it.type == TestPlatform.MAC_BLE_HELPER }
-    val coordinator = TestCoordinator(
+    return runConnectivityTest(
         platforms = availablePlatforms,
         spinUpTimeout = 15.seconds,
+        // BLE discovery adds overhead: scan (2-5s) + connect + read characteristic (3-5s).
+        // LAN-only worst case is ~10s: mDNS propagation (1-2s) + Android fallback poll (5s)
+        //   + iOS resolveWithTimeout (5s) + handshake retries (1-3s at 1s intervals).
+        // DO NOT change these timeouts without understanding the full discovery chain.
+        // Each delay is documented in the PeerNetConnection platform files.
         discoveryTimeout = if (hasBle) 20.seconds else 12.seconds,
         logger = ::println,
     )
-
-    return coordinator.run()
 }
 
 /**

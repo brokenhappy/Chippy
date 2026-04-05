@@ -317,7 +317,7 @@ fun buildAndroidApk(): String {
     val rootDir = System.getProperty("project.root") ?: "."
     val process = ProcessBuilder(
         "$rootDir/gradlew",
-        ":composeApp:assembleDebug",
+        ":connectivityTestAndroidApp:assembleDebug",
         "--no-configuration-cache",
         "-q"
     ).directory(java.io.File(rootDir)).inheritIO().start()
@@ -325,7 +325,7 @@ fun buildAndroidApk(): String {
     if (process.waitFor() != 0) {
         throw IllegalStateException("Failed to build Android APK")
     }
-    return "$rootDir/composeApp/build/outputs/apk/debug/composeApp-debug.apk"
+    return "$rootDir/connectivityTestAndroidApp/build/outputs/apk/debug/connectivityTestAndroidApp-debug.apk"
 }
 
 fun buildIosSimulatorApp(udid: String) {

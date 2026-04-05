@@ -4,7 +4,7 @@
       <option name="executionName" />
       <option name="externalProjectPath" value="$PROJECT_DIR$" />
       <option name="externalSystemIdString" value="GRADLE" />
-      <option name="scriptParameters" value="-Pskip-platforms=android-real-device,ios-simulator -Pno-headless" />
+      <option name="scriptParameters" value="-Pskip-platforms=android-simulator,android-real-device,ios-simulator -Pno-headless" />
       <option name="taskDescriptions">
         <list />
       </option>

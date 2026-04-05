@@ -17,7 +17,7 @@ class AndroidLauncher(
         controlPort: Int,
     ): ProcessBuilder {
         // Uninstall first to avoid signature mismatch (ignore failure if not installed)
-        ProcessBuilder("adb", "-s", emulatorId, "uninstall", "com.woutwerkman")
+        ProcessBuilder("adb", "-s", emulatorId, "uninstall", "com.woutwerkman.connectivitytest")
             .start().waitFor()
 
         // Set up port forwarding for emulator connectivity
@@ -48,7 +48,7 @@ class AndroidLauncher(
         // Launch the app with control channel args as intent extras
         val launchResult = ProcessBuilder(
             "adb", "-s", emulatorId, "shell",
-            "am start -n com.woutwerkman/.ConnectivityTestActivity " +
+            "am start -n com.woutwerkman.connectivitytest/.ConnectivityTestActivity " +
                     "--es instanceId $instanceId " +
                     "--es platforms ${targets.joinToString(",")} " +
                     "--es controlHost $effectiveControlHost " +

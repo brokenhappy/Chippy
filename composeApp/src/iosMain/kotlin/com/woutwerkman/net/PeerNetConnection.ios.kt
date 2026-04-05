@@ -166,60 +166,60 @@ private suspend fun <T> withIosPeerTransport(
 
     try {
         return coroutineScope {
-            // Infrastructure coroutines
-            launch(Dispatchers.Default) {
-                receiveLoop(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
-            }
-            launch {
-                for (command in outgoingChannel) {
-                    handleCommand(command, peerId, peerStates, bleSendToPeer)
+            val childJob = launch {
+                // Infrastructure coroutines
+                launch(Dispatchers.Default) {
+                    receiveLoop(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
                 }
-            }
-            launch {
-                processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, config.displayName, localAddress, boundPort)
-            }
-            launch {
-                driveRunLoopAndRetryHandshakes(peerStates, peerId, config.displayName, localAddress, boundPort)
-            }
-            // BLE transport — discovery + data fallback
-            launch {
-                withBleTransport(peerId, localAddress, boundPort) { ble ->
-                    bleSendToPeer = ble.sendToPeer
-                    // Forward BLE discoveries into the shared discovery channel
-                    launch {
-                        for (peerInfo in ble.discoveredPeers) {
-                            discoveryEvents.trySend(DiscoveryEvent.BleServiceResolved(peerInfo))
-                        }
+                launch {
+                    for (command in outgoingChannel) {
+                        handleCommand(command, peerId, peerStates, bleSendToPeer)
                     }
-                    // Forward BLE incoming data into the main incoming channel
-                    launch {
-                        for ((fromPeerId, payload) in ble.incoming) {
-                            if (peerStates.snapshot().containsKey(fromPeerId)) {
-                                incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload))
+                }
+                launch {
+                    processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, config.displayName, localAddress, boundPort)
+                }
+                launch {
+                    driveRunLoopAndRetryHandshakes(peerStates, peerId, config.displayName, localAddress, boundPort)
+                }
+                // BLE transport — discovery + data fallback
+                launch {
+                    withBleTransport(peerId, localAddress, boundPort) { ble ->
+                        bleSendToPeer = ble.sendToPeer
+                        // Forward BLE discoveries into the shared discovery channel
+                        launch {
+                            for (peerInfo in ble.discoveredPeers) {
+                                discoveryEvents.trySend(DiscoveryEvent.BleServiceResolved(peerInfo))
                             }
                         }
+                        // Forward BLE incoming data into the main incoming channel
+                        launch {
+                            for ((fromPeerId, payload) in ble.incoming) {
+                                if (peerStates.snapshot().containsKey(fromPeerId)) {
+                                    incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload))
+                                }
+                            }
+                        }
+                        // Keep alive until parent scope cancels
+                        awaitCancellation()
                     }
-                    // Keep alive until parent scope cancels
-                    awaitCancellation()
                 }
             }
 
             try {
                 coroutineScope { block(broadcastFn) }
             } finally {
-                coroutineContext.cancelChildren()
+                childJob.cancel()
             }
         }
     } finally {
-        withContext(NonCancellable) {
-            NSLog("[PeerNet-$peerId] Stopping")
-            if (udpSocket >= 0) {
-                close(udpSocket)
-            }
-            withContext(Dispatchers.Main) {
-                bonjourState.browser.stop()
-                bonjourState.service.stop()
-            }
+        NSLog("[PeerNet-$peerId] Stopping")
+        if (udpSocket >= 0) {
+            close(udpSocket)
+        }
+        withContext(NonCancellable + Dispatchers.Main) {
+            bonjourState.browser.stop()
+            bonjourState.service.stop()
         }
     }
 }

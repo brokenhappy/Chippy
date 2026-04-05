@@ -12,7 +12,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
@@ -345,10 +344,10 @@ suspend fun <T> withEventLinearizer(
     block: suspend CoroutineScope.(StateFlow<PeerNetState>) -> T,
 ): T = coroutineScope {
     val state = MutableStateFlow(PeerNetState())
-    val log = mutableListOf<EventWithTime>()
-    var scheduled = emptyList<EventWithTime>()
 
-    launch {
+    val linearizer = launch {
+        val log = mutableListOf<EventWithTime>()
+        var scheduled = emptyList<EventWithTime>()
         while (true) {
             val next = select {
                 events.onReceive { it }
@@ -373,7 +372,7 @@ suspend fun <T> withEventLinearizer(
     try {
         block(state)
     } finally {
-        coroutineContext.cancelChildren()
+        linearizer.cancel()
     }
 }
 

@@ -113,21 +113,23 @@ private suspend fun <T> withJvmPeerTransport(
 
     try {
         return coroutineScope {
-            launch(Dispatchers.IO) {
-                listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
-            }
-            launch {
-                processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
-            }
-            launch {
-                retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
-            }
-            launch {
-                processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId)
-            }
-            if (dnsSdProcess != null) {
+            val childTasks = launch {
                 launch(Dispatchers.IO) {
-                    readDnsSdOutput(dnsSdProcess, serviceName, peerId, discoveryEvents)
+                    listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents)
+                }
+                launch {
+                    processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
+                }
+                launch {
+                    retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
+                }
+                launch {
+                    processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId)
+                }
+                if (dnsSdProcess != null) {
+                    launch(Dispatchers.IO) {
+                        readDnsSdOutput(dnsSdProcess, serviceName, peerId, discoveryEvents)
+                    }
                 }
             }
 
@@ -137,20 +139,18 @@ private suspend fun <T> withJvmPeerTransport(
                 // Destroy dns-sd process first to unblock the blocking readLine() call,
                 // then cancel infrastructure coroutines so coroutineScope can exit.
                 dnsSdProcess?.destroyForcibly()
-                coroutineContext.cancelChildren()
+                childTasks.cancel()
             }
         }
     } finally {
-        withContext(NonCancellable) {
-            println("[PeerNet-$peerId] Stopping")
-            try { dnsSdProcess?.destroyForcibly() } catch (_: Exception) {}
-            try {
-                jmdns.unregisterAllServices()
-                jmdns.close()
-            } catch (_: Exception) {}
-            try { udpSocket.close() } catch (_: Exception) {}
-            println("[PeerNet-$peerId] Stopped")
-        }
+        println("[PeerNet-$peerId] Stopping")
+        try { dnsSdProcess?.destroyForcibly() } catch (_: Exception) {}
+        try {
+            jmdns.unregisterAllServices()
+            jmdns.close()
+        } catch (_: Exception) {}
+        try { udpSocket.close() } catch (_: Exception) {}
+        println("[PeerNet-$peerId] Stopped")
     }
 }
 

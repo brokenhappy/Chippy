@@ -108,26 +108,28 @@ private suspend fun <T> withAndroidPeerTransport(
 
     try {
         return coroutineScope {
-            launch(Dispatchers.IO) {
-                listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents, localAddress, localPort, peerName)
-            }
-            launch {
-                processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
-            }
-            launch {
-                retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
-            }
-            launch {
-                processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, peerName, localAddress, localPort, udpSocket)
-            }
-            launch {
-                pollMdnsAsJmdnsFallback(jmdns, serviceType, discoveryEvents)
+            val childTasks = launch {
+                launch(Dispatchers.IO) {
+                    listenForMessages(udpSocket, peerId, peerStates, incomingChannel, discoveryEvents, localAddress, localPort, peerName)
+                }
+                launch {
+                    processOutgoingCommands(outgoingChannel, peerId, peerStates, udpSocket)
+                }
+                launch {
+                    retryUnacknowledgedHandshakes(peerStates, peerId, peerName, localAddress, localPort, udpSocket)
+                }
+                launch {
+                    processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, peerId, peerName, localAddress, localPort, udpSocket)
+                }
+                launch {
+                    pollMdnsAsJmdnsFallback(jmdns, serviceType, discoveryEvents)
+                }
             }
 
             try {
                 coroutineScope { block(broadcastFn) }
             } finally {
-                coroutineContext.cancelChildren()
+                childTasks.cancel()
             }
         }
     } finally {

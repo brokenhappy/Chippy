@@ -125,7 +125,7 @@ first BLE operation triggers a system permission dialog.
 A Mac-side Swift BLE test helper (`bleTestHelper/main.swift`) acts as a BLE
 peripheral + central for testing BLE discovery with iOS devices. Run via:
 ```bash
-./gradlew :connectivityTest:testConnectibility -Pplatforms=mac-ble-helper,ios-real-device
+./gradlew :connectivityTest:testConnectivity -Pskip-platforms=android-simulator,android-real-device,ios-simulator
 ```
 
 #### Limitations

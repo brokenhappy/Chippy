@@ -8,24 +8,31 @@ import kotlin.time.Duration.Companion.seconds
 
 /**
  * Entry point for the structured connectivity test.
- * Usage: java -cp ... com.woutwerkman.connectivitytest.ConnectivityTestRunnerKt [platforms]
  *
- * Platforms can be: jvm, android-simulator, ios-simulator, ios-real-device, mac-ble-helper
- * If no platforms specified, auto-detects available platforms.
+ * By default runs ALL platforms and errors if any is unavailable.
+ * Use --skip-platform <name> to exclude specific platforms.
+ *
+ * Platforms: jvm, android-simulator, android-real-device, ios-simulator, ios-real-device, mac-ble-helper
  */
 fun main(args: Array<String>) {
     val noHeadless = args.contains("--no-headless")
-    val requestedPlatforms = args.filterNot { it.startsWith("--") }
-        .flatMap { it.split(",") }
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
+    val skippedPlatforms = mutableListOf<String>()
+    var i = 0
+    while (i < args.size) {
+        if (args[i] == "--skip-platform" && i + 1 < args.size) {
+            skippedPlatforms.addAll(args[i + 1].split(",").map { it.trim().lowercase() })
+            i += 2
+        } else {
+            i++
+        }
+    }
 
     println("=".repeat(80))
     println("Chippy Connectivity Test")
     println("=".repeat(80))
 
     val result = runBlocking {
-        runStructuredConnectivityTest(requestedPlatforms, showJvmUi = noHeadless)
+        runStructuredConnectivityTest(skippedPlatforms.toSet(), showJvmUi = noHeadless)
     }
 
     when (result) {
@@ -46,14 +53,10 @@ fun main(args: Array<String>) {
 }
 
 suspend fun runStructuredConnectivityTest(
-    requestedPlatforms: List<String>,
+    skippedPlatforms: Set<String> = emptySet(),
     showJvmUi: Boolean = false,
 ): TestResult {
-    val availablePlatforms = detectAvailablePlatforms(requestedPlatforms, showJvmUi = showJvmUi)
-
-    if (availablePlatforms.isEmpty()) {
-        return TestResult.Failure("No platforms available for testing")
-    }
+    val availablePlatforms = detectAvailablePlatforms(skippedPlatforms, showJvmUi = showJvmUi)
 
     println("Testing platforms: ${availablePlatforms.joinToString(", ") { it.type.toString() }}")
     println()
@@ -73,100 +76,96 @@ suspend fun runStructuredConnectivityTest(
 }
 
 /**
- * Detect which platforms are available and create configs for them.
+ * Detect platforms and create configs. All platforms are required by default.
+ * Platforms in [skippedPlatforms] are silently excluded.
+ * Any non-skipped platform that is unavailable causes an error.
  */
-fun detectAvailablePlatforms(requested: List<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
+fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
-    val platformsToCheck = requested.ifEmpty {
-        listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
+    val allPlatforms = listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
+
+    if (skippedPlatforms.isNotEmpty()) {
+        println("Skipping platforms: ${skippedPlatforms.joinToString(", ")}")
     }
 
-    for (platform in platformsToCheck) {
-        when (platform.lowercase()) {
+    for (platform in allPlatforms) {
+        if (platform in skippedPlatforms) continue
+
+        when (platform) {
             "jvm" -> { /* handled after all other platforms are detected */ }
 
             "android-simulator", "android-real-device" -> {
                 val devices = getConnectedAndroidDevices()
-                val targetPlatform = TestPlatform.fromString(platform) ?: continue
+                val targetPlatform = TestPlatform.fromString(platform)!!
                 val matchingDevices = devices.filter { it.second == targetPlatform }
 
-                if (matchingDevices.isEmpty() && requested.contains(platform)) {
-                    throw IllegalStateException("No connected devices for platform: $platform")
+                if (matchingDevices.isEmpty()) {
+                    error("No connected devices for platform: $platform (use --skip-platform $platform to skip)")
                 }
 
-                if (matchingDevices.isNotEmpty()) {
-                    val apkPath = buildAndroidApkOnce()
-                    matchingDevices.forEachIndexed { i, (deviceId, platformType) ->
-                        val instanceId = if (platformType == TestPlatform.ANDROID_SIMULATOR) "android-sim-${i + 1}" else "android-device-${i + 1}"
-                        configs.add(
-                            PlatformConfig(
-                                type = platformType,
-                                instanceId = instanceId,
-                                runner = AndroidLauncher(deviceId, apkPath),
-                            )
+                val apkPath = buildAndroidApkOnce()
+                matchingDevices.forEachIndexed { i, (deviceId, platformType) ->
+                    val instanceId = if (platformType == TestPlatform.ANDROID_SIMULATOR) "android-sim-${i + 1}" else "android-device-${i + 1}"
+                    configs.add(
+                        PlatformConfig(
+                            type = platformType,
+                            instanceId = instanceId,
+                            runner = AndroidLauncher(deviceId, apkPath),
                         )
-                    }
+                    )
                 }
             }
 
             "ios-simulator" -> {
                 val simulators = getBootedIosSimulators()
-                if (simulators.isEmpty() && requested.contains("ios-simulator")) {
-                    throw IllegalStateException("No iOS simulators booted")
+                if (simulators.isEmpty()) {
+                    error("No iOS simulators booted (use --skip-platform ios-simulator to skip)")
                 }
-                if (simulators.isNotEmpty()) {
-                    val simulator = simulators.first()
-                    buildIosSimulatorApp(simulator.first)
-                    configs.add(
-                        PlatformConfig(
-                            type = TestPlatform.IOS_SIMULATOR,
-                            instanceId = "ios-sim",
-                            runner = IosSimulatorLauncher(simulator.first),
-                        )
+                val simulator = simulators.first()
+                buildIosSimulatorApp(simulator.first)
+                configs.add(
+                    PlatformConfig(
+                        type = TestPlatform.IOS_SIMULATOR,
+                        instanceId = "ios-sim",
+                        runner = IosSimulatorLauncher(simulator.first),
                     )
-                }
+                )
             }
 
             "ios-real-device" -> {
                 val devices = getConnectedIosDevices()
-                if (devices.isEmpty() && requested.contains("ios-real-device")) {
-                    throw IllegalStateException("No iOS devices connected")
+                if (devices.isEmpty()) {
+                    error("No iOS devices connected (use --skip-platform ios-real-device to skip)")
                 }
-                if (devices.isNotEmpty()) {
-                    val device = devices.first()
-                    buildIosDeviceApp(device.first)
-                    configs.add(
-                        PlatformConfig(
-                            type = TestPlatform.IOS_REAL_DEVICE,
-                            instanceId = "ios-device",
-                            runner = IosDeviceLauncher(device.first),
-                        )
+                val device = devices.first()
+                buildIosDeviceApp(device.first)
+                configs.add(
+                    PlatformConfig(
+                        type = TestPlatform.IOS_REAL_DEVICE,
+                        instanceId = "ios-device",
+                        runner = IosDeviceLauncher(device.first),
                     )
-                }
+                )
             }
 
             "mac-ble-helper" -> {
                 val binaryPath = buildBleHelperOnce()
-                if (binaryPath != null) {
-                    configs.add(
-                        PlatformConfig(
-                            type = TestPlatform.MAC_BLE_HELPER,
-                            instanceId = "mac-ble-helper",
-                            runner = BleHelperLauncher(binaryPath),
-                        )
+                    ?: error("Failed to build BLE test helper (use --skip-platform mac-ble-helper to skip)")
+                configs.add(
+                    PlatformConfig(
+                        type = TestPlatform.MAC_BLE_HELPER,
+                        instanceId = "mac-ble-helper",
+                        runner = BleHelperLauncher(binaryPath),
                     )
-                } else if (requested.contains("mac-ble-helper")) {
-                    throw IllegalStateException("Failed to build BLE test helper")
-                }
+                )
             }
         }
     }
 
     // Always add JVM when there are other network platforms — it acts as a gossip relay
-    val networkConfigs = configs.filter { it.type != TestPlatform.MAC_BLE_HELPER }
-    if (networkConfigs.none { it.type == TestPlatform.JVM }) {
-        val detectedNonJvmTypes = networkConfigs.map { it.type }.toSet()
-        val hasOtherPlatforms = detectedNonJvmTypes.isNotEmpty()
+    if ("jvm" !in skippedPlatforms) {
+        val networkConfigs = configs.filter { it.type != TestPlatform.MAC_BLE_HELPER }
+        val hasOtherPlatforms = networkConfigs.isNotEmpty()
         val jvmCount = if (hasOtherPlatforms) 1 else 2
         repeat(jvmCount) { i ->
             configs.add(

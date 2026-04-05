@@ -79,9 +79,9 @@ tasks.register<JavaExec>("testConnectivity") {
     mainClass.set("com.woutwerkman.connectivitytest.ConnectivityTestRunnerKt")
     systemProperty("project.root", rootDir.absolutePath)
 
-    val platformsArg = project.findProperty("platforms")?.toString() ?: ""
-    if (platformsArg.isNotEmpty()) {
-        args(platformsArg)
+    val skipPlatforms = project.findProperty("skip-platforms")?.toString() ?: ""
+    if (skipPlatforms.isNotEmpty()) {
+        args("--skip-platform", skipPlatforms)
     }
 
     if (project.hasProperty("no-headless")) {

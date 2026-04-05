@@ -6,6 +6,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        NSSetUncaughtExceptionHandler { exception in
+            print("[iOS-Test] UNCAUGHT EXCEPTION: \(exception.name.rawValue): \(exception.reason ?? "no reason")")
+            print("[iOS-Test] Stack trace:\n\(exception.callStackSymbols.joined(separator: "\n"))")
+        }
+
         // Parse arguments
         let args = CommandLine.arguments
         var instanceId = "ios-\(Int(Date().timeIntervalSince1970 * 1000) % 100000000)"

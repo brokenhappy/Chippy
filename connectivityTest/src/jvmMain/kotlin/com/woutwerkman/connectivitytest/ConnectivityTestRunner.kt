@@ -84,6 +84,11 @@ fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean =
     val configs = mutableListOf<PlatformConfig>()
     val allPlatforms = listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
 
+    val invalidPlatforms = skippedPlatforms - allPlatforms.toSet()
+    require(invalidPlatforms.isEmpty()) {
+        "Unknown platform(s): ${invalidPlatforms.joinToString(", ")}. Valid platforms: ${allPlatforms.joinToString(", ")}"
+    }
+
     if (skippedPlatforms.isNotEmpty()) {
         println("Skipping platforms: ${skippedPlatforms.joinToString(", ")}")
     }

@@ -2,12 +2,11 @@ package com.woutwerkman.net
 
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -189,30 +188,25 @@ internal suspend fun gossipRouter(
     emitEvent(selfJoin)
     reachabilityKnownPeers.add(raw.localPeerId)
 
-    // Process locally submitted events — add to eventLog and broadcast
-    launch {
-        for (ewt in localEvents) {
-            if (ewt !in eventLog) {
-                eventLog.add(ewt)
-                broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
-            }
-        }
-    }
+    // Single select loop: all state is confined to this one coroutine.
+    // No concurrent access, no synchronization needed.
+    val syncInterval = 2.seconds
+    var nextSyncAt = TimeSource.Monotonic.markNow() + syncInterval
 
-    // Periodic state sync + reachability announce.
-    // 2s interval: frequent enough for peers to converge on a shared event log within a few
-    // seconds of joining, infrequent enough that the gossip traffic stays small relative to
-    // actual application data. This also serves as a keep-alive — if a peer silently disappears,
-    // we'll notice within one reachability cycle.
-    launch {
-        while (currentCoroutineContext().isActive) {
-            delay(2.seconds)
-            for (peerId in directConnections.toList()) {
+    while (true) {
+        val timeUntilSync = nextSyncAt.elapsedNow().let { -it }
+
+        if (timeUntilSync.isNegative()) {
+            // Periodic state sync + reachability announce.
+            // 2s interval: frequent enough for peers to converge on a shared event log within
+            // a few seconds of joining, infrequent enough that the gossip traffic stays small
+            // relative to actual application data.
+            for (peerId in directConnections) {
                 sendToRaw(raw, peerId, "$LIN_STATE_RESP${linJson.encodeToString(eventLog.toList())}")
             }
             broadcastReachability()
             // Share all known reachability data for multi-hop BFS
-            for (peerId in directConnections.toList()) {
+            for (peerId in directConnections) {
                 for ((announcer, peers) in reachabilityMap) {
                     if (announcer != peerId) {
                         val announce = ReachabilityAnnounce(announcer, peers)
@@ -220,84 +214,94 @@ internal suspend fun gossipRouter(
                     }
                 }
             }
+            nextSyncAt = TimeSource.Monotonic.markNow() + syncInterval
+            continue
         }
-    }
 
-    // Process incoming messages
-    for (message in raw.incoming) {
-        when (message) {
-            is RawPeerMessage.Event.Connected -> {
-                directConnections.add(message.peer.id)
-                reachabilityKnownPeers.add(message.peer.id)
-                val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Joined(message.peer))
-                emitEvent(ewt)
-                broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
-                sendToRaw(raw, message.peer.id, "$LIN_STATE_RESP${linJson.encodeToString(eventLog.toList())}")
-                broadcastReachability()
+        select {
+            raw.incoming.onReceive { message ->
+                when (message) {
+                    is RawPeerMessage.Event.Connected -> {
+                        directConnections.add(message.peer.id)
+                        reachabilityKnownPeers.add(message.peer.id)
+                        val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Joined(message.peer))
+                        emitEvent(ewt)
+                        broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
+                        sendToRaw(raw, message.peer.id, "$LIN_STATE_RESP${linJson.encodeToString(eventLog.toList())}")
+                        broadcastReachability()
+                    }
+                    is RawPeerMessage.Event.Disconnected -> {
+                        directConnections.remove(message.peerId)
+                        reachabilityMap.remove(message.peerId)
+                        val stillReachable = allReachablePeers()
+                        if (message.peerId !in stillReachable) {
+                            reachabilityKnownPeers.remove(message.peerId)
+                            val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Left(message.peerId))
+                            emitEvent(ewt)
+                            broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
+                        }
+                        emitLeftForUnreachablePeers()
+                        broadcastReachability()
+                    }
+                    is RawPeerMessage.Received -> {
+                        val payload = message.payload.decodeToString()
+                        when {
+                            payload.startsWith(LIN_ROUTE) -> {
+                                val rest = payload.removePrefix(LIN_ROUTE)
+                                val firstPipe = rest.indexOf('|')
+                                val secondPipe = rest.indexOf('|', firstPipe + 1)
+                                if (firstPipe >= 0 && secondPipe >= 0) {
+                                    val targetId = rest.substring(0, firstPipe)
+                                    val ttl = rest.substring(firstPipe + 1, secondPipe).toIntOrNull()
+                                    val innerPayload = rest.substring(secondPipe + 1)
+                                    if (ttl != null) {
+                                        if (targetId == raw.localPeerId) {
+                                            handleGossipPayload(innerPayload)
+                                        } else if (ttl > 1) {
+                                            val nextHop = if (targetId in directConnections) targetId
+                                                else electMedium(targetId)
+                                            if (nextHop != null) {
+                                                sendToRaw(raw, nextHop, "$LIN_ROUTE$targetId|${ttl - 1}|$innerPayload")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            payload.startsWith(LIN_REACH) -> {
+                                val announce = try {
+                                    linJson.decodeFromString<ReachabilityAnnounce>(payload.removePrefix(LIN_REACH))
+                                } catch (_: Exception) { return@onReceive }
+                                reachabilityMap[announce.peerId] = announce.directPeers
+                                emitLeftForUnreachablePeers()
+                                val reachable = allReachablePeers()
+                                for (peerId in reachable) {
+                                    if (peerId !in reachabilityKnownPeers && peerId != raw.localPeerId) {
+                                        reachabilityKnownPeers.add(peerId)
+                                        val alreadyKnown = eventLog.any {
+                                            it.event is PeerEvent.Joined && (it.event as PeerEvent.Joined).peer.id == peerId
+                                        }
+                                        if (!alreadyKnown) {
+                                            val peerInfo = PeerInfo(id = peerId, name = peerId, address = "", port = 0)
+                                            val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Joined(peerInfo))
+                                            emitEvent(ewt)
+                                        }
+                                    }
+                                }
+                            }
+                            else -> handleGossipPayload(payload)
+                        }
+                    }
+                }
             }
-            is RawPeerMessage.Event.Disconnected -> {
-                directConnections.remove(message.peerId)
-                reachabilityMap.remove(message.peerId)
-                val stillReachable = allReachablePeers()
-                if (message.peerId !in stillReachable) {
-                    reachabilityKnownPeers.remove(message.peerId)
-                    val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Left(message.peerId))
-                    emitEvent(ewt)
+
+            localEvents.onReceive { ewt ->
+                if (ewt !in eventLog) {
+                    eventLog.add(ewt)
                     broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
                 }
-                emitLeftForUnreachablePeers()
-                broadcastReachability()
             }
-            is RawPeerMessage.Received -> {
-                val payload = message.payload.decodeToString()
-                when {
-                    payload.startsWith(LIN_ROUTE) -> {
-                        val rest = payload.removePrefix(LIN_ROUTE)
-                        val firstPipe = rest.indexOf('|')
-                        val secondPipe = rest.indexOf('|', firstPipe + 1)
-                        if (firstPipe < 0 || secondPipe < 0) continue
-                        val targetId = rest.substring(0, firstPipe)
-                        val ttl = rest.substring(firstPipe + 1, secondPipe).toIntOrNull() ?: continue
-                        val innerPayload = rest.substring(secondPipe + 1)
-                        if (targetId == raw.localPeerId) {
-                            handleGossipPayload(innerPayload)
-                        } else if (ttl > 1) {
-                            val nextHop = if (targetId in directConnections) targetId
-                                else electMedium(targetId)
-                            if (nextHop != null) {
-                                sendToRaw(raw, nextHop, "$LIN_ROUTE$targetId|${ttl - 1}|$innerPayload")
-                            }
-                        }
-                    }
-                    payload.startsWith(LIN_REACH) -> {
-                        val announce = try {
-                            linJson.decodeFromString<ReachabilityAnnounce>(payload.removePrefix(LIN_REACH))
-                        } catch (_: Exception) { continue }
-                        reachabilityMap[announce.peerId] = announce.directPeers
-                        // Check for peers that became unreachable
-                        emitLeftForUnreachablePeers()
-                        // Discover new indirect peers via reachability
-                        val reachable = allReachablePeers()
-                        for (peerId in reachable) {
-                            if (peerId !in reachabilityKnownPeers && peerId != raw.localPeerId) {
-                                reachabilityKnownPeers.add(peerId)
-                                // Only emit Joined if we don't already have one for this peer in the log.
-                                // The gossip/state-sync Joined carries the correct display name;
-                                // emitting a reachability-based Joined with peerId as name would overwrite it.
-                                val alreadyKnown = eventLog.any {
-                                    it.event is PeerEvent.Joined && (it.event as PeerEvent.Joined).peer.id == peerId
-                                }
-                                if (!alreadyKnown) {
-                                    val peerInfo = PeerInfo(id = peerId, name = peerId, address = "", port = 0)
-                                    val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Joined(peerInfo))
-                                    emitEvent(ewt)
-                                }
-                            }
-                        }
-                    }
-                    else -> handleGossipPayload(payload)
-                }
-            }
+
+            onTimeout(timeUntilSync) {} // wake up for sync
         }
     }
 }

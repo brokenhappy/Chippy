@@ -4,16 +4,12 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.awaitCancellation
 import platform.Foundation.*
 import platform.darwin.*
 import platform.posix.*
 import kotlin.concurrent.AtomicReference
-import kotlin.random.Random
-
-
 
 private fun htons(value: UShort): UShort =
     ((value.toInt() and 0xFF) shl 8 or (value.toInt() shr 8 and 0xFF)).toUShort()
@@ -37,17 +33,6 @@ internal class AtomicPeerStates : PeerStates {
         }
     }
 
-    /** Atomically update a single peer's state. Returns the new state, or null if peer not found. */
-    inline fun update(peerId: String, transform: (PeerState) -> PeerState): PeerState? {
-        while (true) {
-            val current = ref.value
-            val existing = current[peerId] ?: return null
-            val updated = transform(existing)
-            if (ref.compareAndSet(current, current + (peerId to updated))) return updated
-        }
-    }
-
-    /** Atomically compute a new value for [peerId]. The [transform] receives the current state (or null). */
     override inline fun compute(peerId: String, transform: (PeerState?) -> PeerState?): PeerState? {
         while (true) {
             val current = ref.value
@@ -56,42 +41,17 @@ internal class AtomicPeerStates : PeerStates {
             if (ref.compareAndSet(current, newMap)) return result
         }
     }
-
-    /** Insert [peerId] if absent, using [default] to create the initial value. Returns the existing or new state. */
-    inline fun getOrPut(peerId: String, default: () -> PeerState): PeerState {
-        while (true) {
-            val current = ref.value
-            current[peerId]?.let { return it }
-            val newState = default()
-            if (ref.compareAndSet(current, current + (peerId to newState))) return newState
-        }
-    }
 }
 
-/**
- * Events from discovery callbacks (Bonjour), bridged into the coroutine world.
- */
-private sealed class DiscoveryEvent {
-    data class ServiceResolved(val service: NSNetService) : DiscoveryEvent()
-    data class BleServiceResolved(val peerInfo: PeerInfo) : DiscoveryEvent()
-}
-
-/**
- * Resource function that sets up the iOS peer transport, runs [block] with a
- * broadcastDirect function, and tears down all resources when [block] completes.
- */
 @OptIn(ExperimentalForeignApi::class)
-internal suspend fun <T> withIosPeerTransport(
+internal actual suspend fun <T> withTransport(
     config: PeerNetConfig,
     peerId: String,
-    incomingChannel: SendChannel<RawPeerMessage>,
-    outgoingChannel: ReceiveChannel<PeerCommand>,
-    block: suspend CoroutineScope.((ByteArray) -> Unit) -> T,
+    block: suspend CoroutineScope.(TransportHandle) -> T,
 ): T {
     val serviceType = "_${config.serviceName}._udp."
-    val peerStates = AtomicPeerStates()
-    val discoveryEvents = Channel<DiscoveryEvent>(Channel.BUFFERED)
-    val joinedEvents = Channel<String>(Channel.BUFFERED)
+    val discoveryEvents = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
+    val receivedPackets = Channel<ReceivedPacket>(Channel.BUFFERED)
 
     NSLog("[PeerNet-$peerId] Starting peer discovery")
     val localAddress = getLocalIpAddress()
@@ -100,23 +60,6 @@ internal suspend fun <T> withIosPeerTransport(
     val udpSocket = createUdpSocket(peerId)
     val boundPort = getSocketBoundPort(udpSocket)
     NSLog("[PeerNet-$peerId] Listening on port $boundPort")
-
-    // BLE send function — set when BLE transport is active
-    var bleSendToPeer: ((String, ByteArray) -> Boolean)? = null
-
-    val broadcastFn: (ByteArray) -> Unit = { payload ->
-        val message = "$peerId:${payload.decodeToString()}"
-        peerStates.snapshot().forEach { (pId, state) ->
-            if (state.udpHandshakeComplete) {
-                sendUdp(state.info.address, state.info.port, message)
-            } else if (state.bleConnected) {
-                bleSendToPeer?.invoke(pId, payload)
-            } else {
-                // Best effort: try UDP anyway
-                sendUdp(state.info.address, state.info.port, message)
-            }
-        }
-    }
 
     // Set non-blocking mode for receive loop
     val flags = fcntl(udpSocket, F_GETFL, 0)
@@ -128,55 +71,56 @@ internal suspend fun <T> withIosPeerTransport(
         startBonjour(config, peerId, localAddress, boundPort, serviceType, discoveryEvents, resolverDelegates)
     }
 
+    val handle = TransportHandle(
+        localAddress = localAddress,
+        localPort = boundPort,
+        discoveryEvents = discoveryEvents,
+        receivedPackets = receivedPackets,
+        sendUdp = { address, port, message -> sendUdp(address, port, message) },
+        platformTasks = {
+            // Drive the RunLoop so Bonjour delegate callbacks fire
+            launch {
+                while (true) {
+                    withContext(Dispatchers.Main) {
+                        NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
+                    }
+                    delay(50.milliseconds)
+                }
+            }
+            // BLE transport — discovery + data fallback
+            launch {
+                withBleTransport(peerId, localAddress, boundPort) { ble ->
+                    // Forward BLE discoveries as service discovery events
+                    launch {
+                        for (peerInfo in ble.discoveredPeers) {
+                            val serviceName = formatServiceName(peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port)
+                            discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(serviceName))
+                        }
+                    }
+                    // Forward BLE incoming data as received packets
+                    launch {
+                        for ((fromPeerId, payload) in ble.incoming) {
+                            receivedPackets.trySend(
+                                ReceivedPacket("$fromPeerId:${payload.decodeToString()}", localAddress, boundPort)
+                            )
+                        }
+                    }
+                    awaitCancellation()
+                }
+            }
+        },
+    )
+
     try {
         return coroutineScope {
-            val childJob = launch {
-                // Infrastructure coroutines
-                launch(Dispatchers.Default) {
-                    receiveLoop(udpSocket, peerId, peerStates, incomingChannel, joinedEvents)
-                }
-                launch {
-                    for (command in outgoingChannel) {
-                        handleCommand(command, peerId, peerStates, bleSendToPeer)
-                    }
-                }
-                launch {
-                    processDiscoveryEvents(discoveryEvents, peerStates, incomingChannel, joinedEvents, peerId, config.displayName, localAddress, boundPort)
-                }
-                launch {
-                    processJoinedEvents(joinedEvents, peerStates, incomingChannel, peerId)
-                }
-                launch {
-                    driveRunLoopAndRetryHandshakes(peerStates, peerId, config.displayName, localAddress, boundPort)
-                }
-                // BLE transport — discovery + data fallback
-                launch {
-                    withBleTransport(peerId, localAddress, boundPort) { ble ->
-                        bleSendToPeer = ble.sendToPeer
-                        // Forward BLE discoveries into the shared discovery channel
-                        launch {
-                            for (peerInfo in ble.discoveredPeers) {
-                                discoveryEvents.trySend(DiscoveryEvent.BleServiceResolved(peerInfo))
-                            }
-                        }
-                        // Forward BLE incoming data into the main incoming channel
-                        launch {
-                            for ((fromPeerId, payload) in ble.incoming) {
-                                if (peerStates.snapshot().containsKey(fromPeerId)) {
-                                    incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload))
-                                }
-                            }
-                        }
-                        // Keep alive until parent scope cancels
-                        awaitCancellation()
-                    }
-                }
+            val receiveJob = launch(Dispatchers.Default) {
+                receiveLoop(udpSocket, receivedPackets)
             }
 
             try {
-                coroutineScope { block(broadcastFn) }
+                coroutineScope { block(handle) }
             } finally {
-                childJob.cancel()
+                receiveJob.cancel()
             }
         }
     } finally {
@@ -187,141 +131,6 @@ internal suspend fun <T> withIosPeerTransport(
         withContext(NonCancellable + Dispatchers.Main) {
             bonjourState.browser.stop()
             bonjourState.service.stop()
-        }
-    }
-}
-
-private data class BonjourState(
-    val service: NSNetService,
-    val browser: NSNetServiceBrowser,
-)
-
-private fun startBonjour(
-    config: PeerNetConfig,
-    peerId: String,
-    localAddress: String,
-    boundPort: Int,
-    serviceType: String,
-    discoveryEvents: SendChannel<DiscoveryEvent>,
-    resolverDelegates: MutableList<NetServiceResolveDelegate>,
-): BonjourState {
-    val serviceName = formatServiceName(config.displayName, peerId, localAddress, boundPort)
-    NSLog("[PeerNet-$peerId] Registering service: $serviceName")
-    NSLog("[PeerNet-$peerId] Service type: $serviceType")
-
-    val publishDelegate = NetServicePublishDelegate(peerId)
-    val netService = NSNetService(
-        domain = "local.",
-        type = serviceType,
-        name = serviceName,
-        port = boundPort
-    )
-    netService.delegate = publishDelegate
-    NSLog("[PeerNet-$peerId] Calling publish()...")
-    netService.publish()
-    netService.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
-    NSLog("[PeerNet-$peerId] Service scheduled in run loop")
-
-    val browserDelegate = NetServiceBrowserDelegate(
-        peerId = peerId,
-        onServiceFound = { service ->
-            NSLog("[PeerNet-$peerId] Found service: ${service.name}")
-            val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
-                discoveryEvents.trySend(DiscoveryEvent.ServiceResolved(resolvedService))
-            }
-            resolverDelegates.add(resolveDelegate)
-            service.delegate = resolveDelegate
-            // 5s is Apple's recommended max timeout. Typical resolution on LAN is <500ms.
-            // This is a safety net, not the expected duration.
-            service.resolveWithTimeout(5.0)
-        }
-    )
-
-    val netServiceBrowser = NSNetServiceBrowser()
-    netServiceBrowser.delegate = browserDelegate
-    netServiceBrowser.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
-    NSLog("[PeerNet-$peerId] Starting browser search for type: $serviceType")
-    netServiceBrowser.searchForServicesOfType(serviceType, inDomain = "local.")
-    NSLog("[PeerNet-$peerId] Bonjour setup complete")
-
-    return BonjourState(service = netService, browser = netServiceBrowser)
-}
-
-/**
- * Combined RunLoop driver and handshake retry loop.
- *
- * iOS Bonjour (NSNetService) requires the main RunLoop to be pumped for delegate callbacks to
- * fire. We drive it in 50ms increments — fast enough for responsive discovery, slow enough to
- * not burn CPU. We also retry handshakes in the same loop since the 50ms cadence is more
- * aggressive than the 1s retry on other platforms, compensating for iOS's more complex
- * discovery path (Bonjour resolve + BLE).
- */
-private suspend fun driveRunLoopAndRetryHandshakes(
-    peerStates: AtomicPeerStates,
-    peerId: String,
-    displayName: String,
-    localAddress: String,
-    boundPort: Int,
-) {
-    while (true) {
-        withContext(Dispatchers.Main) {
-            NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
-        }
-
-        delay(50.milliseconds)
-
-        peerStates.snapshot().forEach { (pId, state) ->
-            if (state.weSeeThemViaDiscovery && !state.isJoined && state.info.port > 0) {
-                sendHandshakeHello(peerId, displayName, localAddress, boundPort, state.info)
-                peerStates.update(pId) { it.copy(weSentHello = true) }
-            }
-        }
-    }
-}
-
-private suspend fun processDiscoveryEvents(
-    events: ReceiveChannel<DiscoveryEvent>,
-    peerStates: AtomicPeerStates,
-    incomingChannel: SendChannel<RawPeerMessage>,
-    joinedEvents: SendChannel<String>,
-    peerId: String,
-    peerName: String,
-    localAddress: String,
-    boundPort: Int,
-) {
-    for (event in events) {
-        when (event) {
-            is DiscoveryEvent.ServiceResolved -> {
-                val parsed = parseServiceName(event.service.name) ?: continue
-                if (parsed.peerId == peerId) continue
-
-                val peerInfo = PeerInfo(id = parsed.peerId, name = parsed.peerName, address = parsed.address, port = parsed.port)
-                peerStates.getOrPut(parsed.peerId) {
-                    NSLog("[PeerNet-$peerId] Discovered via mDNS: ${parsed.peerName} (${parsed.peerId}) at ${parsed.address}:${parsed.port}")
-                    PeerState(info = peerInfo)
-                }
-                peerStates.update(parsed.peerId) { it.copy(weSeeThemViaDiscovery = true, weSentHello = true) }
-
-                sendHandshakeHello(peerId, peerName, localAddress, boundPort, peerInfo)
-            }
-            is DiscoveryEvent.BleServiceResolved -> {
-                val peerInfo = event.peerInfo
-                val pId = peerInfo.id
-
-                if (pId == peerId) continue
-
-                peerStates.getOrPut(pId) {
-                    NSLog("[PeerNet-$peerId] Discovered via BLE: ${peerInfo.name} ($pId) at ${peerInfo.address}:${peerInfo.port}")
-                    PeerState(info = peerInfo)
-                }
-                peerStates.update(pId) { it.copy(bleConnected = true, weSeeThemViaDiscovery = true) }
-
-                // Try UDP handshake — if it succeeds, we'll prefer UDP (skip if port is 0)
-                if (peerInfo.port > 0) {
-                    peerStates.update(pId) { it.copy(weSentHello = true) }
-                    sendHandshakeHello(peerId, peerName, localAddress, boundPort, peerInfo)
-                }
-            }
         }
     }
 }
@@ -369,13 +178,14 @@ private fun getSocketBoundPort(fd: Int): Int = memScoped {
     htons(boundAddr.sin_port).toInt()
 }
 
+/**
+ * Non-blocking UDP receive loop using POSIX recvfrom.
+ * Polls every 10ms — fast enough for responsive discovery, cheap enough to not burn CPU.
+ */
 @OptIn(ExperimentalForeignApi::class)
 private suspend fun receiveLoop(
     udpSocket: Int,
-    peerId: String,
-    peerStates: AtomicPeerStates,
-    incomingChannel: SendChannel<RawPeerMessage>,
-    joinedEvents: SendChannel<String>,
+    receivedPackets: SendChannel<ReceivedPacket>,
 ) {
     val buffer = ByteArray(4096)
 
@@ -397,115 +207,13 @@ private suspend fun receiveLoop(
 
                 if (bytesRead > 0) {
                     val senderIp = inet_ntoa(senderAddr.sin_addr.readValue())?.toKString() ?: "unknown"
+                    val senderPort = htons(senderAddr.sin_port).toInt()
                     val message = buffer.decodeToString(0, bytesRead.toInt())
-
-                    val (fromPeerId, payload) = parseUdpMessage(message, peerId) ?: return@usePinned
-
-                    when {
-                        payload.startsWith(HANDSHAKE_HELLO) -> {
-                            handleHelloReceived(fromPeerId, payload, senderIp, peerId, peerStates, joinedEvents)
-                        }
-                        payload.startsWith(HANDSHAKE_ACK) -> {
-                            handleAckReceived(fromPeerId, peerId, peerStates, joinedEvents)
-                        }
-                        else -> {
-                            if (peerStates[fromPeerId] != null) {
-                                incomingChannel.send(RawPeerMessage.Received(fromPeerId, payload.encodeToByteArray()))
-                            }
-                        }
-                    }
+                    receivedPackets.trySend(ReceivedPacket(message, senderIp, senderPort))
                 }
             }
         }
-        // 10ms polling interval: the socket is non-blocking (O_NONBLOCK), so recvfrom returns
-        // immediately when no data is available. Without this delay we'd spin at 100% CPU.
-        // 10ms keeps latency imperceptible while being cheap.
         delay(10.milliseconds)
-    }
-}
-
-private fun handleHelloReceived(
-    fromPeerId: String,
-    payload: String,
-    fromAddress: String,
-    peerId: String,
-    peerStates: AtomicPeerStates,
-    joinedEvents: SendChannel<String>,
-) {
-    val hello = parseHelloPayload(payload, fromAddress)
-    var pAddr = hello.address
-    val pPort = hello.port
-
-    if (pAddr == "10.0.2.15") {
-        pAddr = fromAddress
-    }
-
-    val peerInfo = PeerInfo(id = fromPeerId, name = hello.peerName, address = pAddr, port = pPort)
-
-    peerStates.getOrPut(fromPeerId) {
-        NSLog("[PeerNet-$peerId] Received HELLO from new peer: ${hello.peerName} ($fromPeerId) at $pAddr:$pPort")
-        PeerState(info = peerInfo)
-    }
-    val state = peerStates.update(fromPeerId) {
-        it.copy(info = peerInfo, weSeeThemViaDiscovery = true, weAckedThem = true)
-    }
-
-    sendHandshakeAck(peerId, peerInfo)
-
-    if (state != null) checkAndEmitJoined(fromPeerId, state, joinedEvents)
-}
-
-private fun handleAckReceived(
-    fromPeerId: String,
-    peerId: String,
-    peerStates: AtomicPeerStates,
-    joinedEvents: SendChannel<String>,
-) {
-    NSLog("[PeerNet-$peerId] Received ACK from: $fromPeerId")
-    val state = peerStates.update(fromPeerId) { it.copy(theyAckedUs = true, udpHandshakeComplete = true) } ?: return
-    checkAndEmitJoined(fromPeerId, state, joinedEvents)
-}
-
-private fun sendHandshakeHello(peerId: String, peerName: String, localAddress: String, boundPort: Int, peer: PeerInfo) {
-    NSLog("[PeerNet-$peerId] Sending HELLO to ${peer.name} at ${peer.address}:${peer.port}")
-    sendUdp(peer.address, peer.port, "$peerId:${formatHelloPayload(peerName, peerId, localAddress, boundPort)}")
-}
-
-private fun sendHandshakeAck(peerId: String, peer: PeerInfo) {
-    sendUdp(peer.address, peer.port, "$peerId:${formatAckPayload(peerId)}")
-}
-
-private fun handleCommand(
-    command: PeerCommand,
-    peerId: String,
-    peerStates: AtomicPeerStates,
-    bleSendToPeer: ((String, ByteArray) -> Boolean)?,
-) {
-    val snapshot = peerStates.snapshot()
-    when (command) {
-        is PeerCommand.SendTo -> {
-            val state = snapshot[command.peerId]
-            if (state != null) {
-                if (state.udpHandshakeComplete) {
-                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
-                } else if (state.bleConnected) {
-                    bleSendToPeer?.invoke(command.peerId, command.payload)
-                } else {
-                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
-                }
-            }
-        }
-        is PeerCommand.Broadcast -> {
-            snapshot.forEach { (pId, state) ->
-                if (state.udpHandshakeComplete) {
-                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
-                } else if (state.bleConnected) {
-                    bleSendToPeer?.invoke(pId, command.payload)
-                } else {
-                    sendUdp(state.info.address, state.info.port, "$peerId:${command.payload.decodeToString()}")
-                }
-            }
-        }
     }
 }
 
@@ -536,7 +244,59 @@ private fun sendUdp(address: String, port: Int, message: String) {
     }
 }
 
-// Delegate classes
+// ==================== Bonjour ====================
+
+private data class BonjourState(
+    val service: NSNetService,
+    val browser: NSNetServiceBrowser,
+)
+
+private fun startBonjour(
+    config: PeerNetConfig,
+    peerId: String,
+    localAddress: String,
+    boundPort: Int,
+    serviceType: String,
+    discoveryEvents: SendChannel<ServiceDiscoveryEvent>,
+    resolverDelegates: MutableList<NetServiceResolveDelegate>,
+): BonjourState {
+    val serviceName = formatServiceName(config.displayName, peerId, localAddress, boundPort)
+    NSLog("[PeerNet-$peerId] Registering service: $serviceName")
+
+    val publishDelegate = NetServicePublishDelegate(peerId)
+    val netService = NSNetService(
+        domain = "local.",
+        type = serviceType,
+        name = serviceName,
+        port = boundPort
+    )
+    netService.delegate = publishDelegate
+    netService.publish()
+    netService.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+
+    val browserDelegate = NetServiceBrowserDelegate(
+        peerId = peerId,
+        onServiceFound = { service ->
+            NSLog("[PeerNet-$peerId] Found service: ${service.name}")
+            val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
+                discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(resolvedService.name))
+            }
+            resolverDelegates.add(resolveDelegate)
+            service.delegate = resolveDelegate
+            service.resolveWithTimeout(5.0)
+        }
+    )
+
+    val netServiceBrowser = NSNetServiceBrowser()
+    netServiceBrowser.delegate = browserDelegate
+    netServiceBrowser.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+    netServiceBrowser.searchForServicesOfType(serviceType, inDomain = "local.")
+
+    return BonjourState(service = netService, browser = netServiceBrowser)
+}
+
+// ==================== Bonjour Delegates ====================
+
 private class NetServiceBrowserDelegate(
     private val peerId: String,
     private val onServiceFound: (NSNetService) -> Unit
@@ -546,8 +306,6 @@ private class NetServiceBrowserDelegate(
         NSLog("[PeerNet-$peerId] Browser found service: ${didFindService.name}, moreComing=$moreComing")
         if (!didFindService.name.contains(peerId)) {
             onServiceFound(didFindService)
-        } else {
-            NSLog("[PeerNet-$peerId] Ignoring own service")
         }
     }
 

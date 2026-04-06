@@ -4,10 +4,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import java.net.*
-import javax.jmdns.JmDNS
-import javax.jmdns.ServiceEvent
-import javax.jmdns.ServiceInfo
-import javax.jmdns.ServiceListener
 
 internal actual suspend fun <T> withTransport(
     config: PeerNetConfig,
@@ -68,64 +64,6 @@ internal actual suspend fun <T> withTransport(
         try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
         try { udpSocket.close() } catch (_: Exception) {}
         println("[PeerNet-$peerId] Stopped")
-    }
-}
-
-private fun startJmdns(
-    peerId: String,
-    localAddress: String,
-    localPort: Int,
-    serviceType: String,
-    peerName: String,
-    discoveryEvents: SendChannel<ServiceDiscoveryEvent>,
-): JmDNS {
-    val inetAddress = InetAddress.getByName(localAddress)
-    val jmdns = JmDNS.create(inetAddress, localAddress)
-    println("[PeerNet-$peerId] JmDNS created on $localAddress")
-
-    jmdns.addServiceListener(serviceType, object : ServiceListener {
-        override fun serviceAdded(event: ServiceEvent) {
-            jmdns.requestServiceInfo(event.type, event.name, true)
-        }
-
-        override fun serviceRemoved(event: ServiceEvent) {
-            discoveryEvents.trySend(ServiceDiscoveryEvent.Removed(event.name))
-        }
-
-        override fun serviceResolved(event: ServiceEvent) {
-            discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(event.name))
-        }
-    })
-
-    val fullServiceName = formatServiceName(peerName, peerId, localAddress, localPort)
-    val serviceInfo = ServiceInfo.create(serviceType, fullServiceName, localPort, "PeerNet")
-    jmdns.registerService(serviceInfo)
-    println("[PeerNet-$peerId] mDNS service registered: $fullServiceName")
-
-    return jmdns
-}
-
-private suspend fun listenForPackets(
-    udpSocket: DatagramSocket,
-    peerId: String,
-    receivedPackets: SendChannel<ReceivedPacket>,
-) {
-    val buffer = ByteArray(65535)
-    println("[PeerNet-$peerId] Listening for messages on port ${udpSocket.localPort}")
-
-    while (true) {
-        try {
-            val packet = DatagramPacket(buffer, buffer.size)
-            withContext(Dispatchers.IO) { udpSocket.receive(packet) }
-            val message = String(packet.data, 0, packet.length, Charsets.UTF_8)
-            receivedPackets.send(ReceivedPacket(message, packet.address.hostAddress ?: "", packet.port))
-        } catch (_: SocketTimeoutException) {
-            // Expected: soTimeout (100ms) fires to allow cancellation checks
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            println("[PeerNet-$peerId] Socket receive error: ${e::class.simpleName}: ${e.message}")
-        }
     }
 }
 

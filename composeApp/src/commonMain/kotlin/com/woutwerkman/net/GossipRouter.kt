@@ -278,14 +278,10 @@ internal suspend fun gossipRouter(
                                 for (peerId in reachable) {
                                     if (peerId !in reachabilityKnownPeers && peerId != raw.localPeerId) {
                                         reachabilityKnownPeers.add(peerId)
-                                        val alreadyKnown = eventLog.any {
-                                            it.event is PeerEvent.Joined && (it.event as PeerEvent.Joined).peer.id == peerId
-                                        }
-                                        if (!alreadyKnown) {
-                                            val peerInfo = PeerInfo(id = peerId, name = peerId, address = "", port = 0)
-                                            val ewt = EventWithTime(clock.now(), raw.localPeerId, PeerEvent.Joined(peerInfo))
-                                            emitEvent(ewt)
-                                        }
+                                        // Don't emit a placeholder Joined here. The real Joined event
+                                        // (with the correct display name) will arrive via state sync
+                                        // within ~2s. Emitting a placeholder with name=peerId would
+                                        // overwrite the real name if it arrives out of order.
                                     }
                                 }
                             }

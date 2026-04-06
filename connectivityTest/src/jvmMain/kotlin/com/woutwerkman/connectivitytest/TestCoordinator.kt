@@ -37,26 +37,21 @@ enum class DiscoveryTestState { LAUNCHING, READY, DONE }
  * Each platform runner manages its own transport (in-process channels, TCP, etc.).
  * This function only orchestrates the READY → START → DONE protocol.
  */
-@OptIn(DelicateCoroutinesApi::class)
 suspend fun runConnectivityTest(
     platforms: List<PlatformConfig>,
     spinUpTimeout: Duration,
     discoveryTimeout: Duration,
     logger: (String) -> Unit,
-): TestResult {
+): TestResult = coroutineScope {
     val testState = MutableStateFlow(platforms.associate { it.instanceId to DiscoveryTestState.LAUNCHING })
 
-    // Launch platform lifecycles in GlobalScope so their cleanup doesn't block
-    // the caller. External processes (devicectl, simctl) and JmDNS can take 10+ seconds
-    // to shut down, but the test result is known as soon as all platforms report DONE.
-    val platformJobs = platforms.map { platform ->
-        // I'm sorry for this disgusting fix, I'll make the AI fix this later again I hope
-        GlobalScope.launch {
+    platforms.forEach { platform ->
+        launch(Dispatchers.Default) {
             runPlatformTestLifecycle(platform, platforms.map { it.type }, testState, logger)
         }
     }
 
-    return try {
+    try {
         withTimeoutOrNull(spinUpTimeout) {
             testState.waitForAllPlatformsToBeReadyForDiscovery()
         } ?: throw spinUpTimeoutError(testState.value)
@@ -74,8 +69,6 @@ suspend fun runConnectivityTest(
     } catch (e: Exception) {
         logger("FAILURE: ${e.message}")
         TestResult.Failure("Test failed: ${e.message}", e)
-    } finally {
-        platformJobs.forEach { it.cancel() }
     }
 }
 

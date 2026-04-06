@@ -11,7 +11,6 @@ import kotlinx.coroutines.runInterruptible
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
-import java.nio.channels.ClosedByInterruptException
 import java.nio.channels.DatagramChannel
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceEvent

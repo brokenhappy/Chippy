@@ -73,6 +73,12 @@ internal class TransportHandle(
      * and mDNS polling. Empty on platforms with no extra needs.
      */
     val platformTasks: (suspend CoroutineScope.() -> Unit)? = null,
+    /**
+     * Called before child coroutines are cancelled during teardown.
+     * Platforms use this to release blocking resources (e.g., destroy processes)
+     * so that blocked coroutines can respond to cancellation.
+     */
+    val prepareForTeardown: () -> Unit = {},
 )
 
 /**

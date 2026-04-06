@@ -205,9 +205,10 @@ internal suspend fun <T> withRawPeerNetConnectionCommon(
             try {
                 coroutineScope { block(connection) }
             } finally {
-                childTasks.cancel()
                 incoming.close()
                 outgoing.close()
+                transport.prepareForTeardown()
+                childTasks.cancel()
             }
         }
     }

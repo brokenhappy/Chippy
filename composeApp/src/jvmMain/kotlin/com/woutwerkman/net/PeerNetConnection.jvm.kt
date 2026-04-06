@@ -44,6 +44,11 @@ internal actual suspend fun <T> withTransport(
                     }
                 }
             },
+            prepareForTeardown = {
+                // Destroy dns-sd process to unblock its readLine() so the coroutine
+                // can respond to cancellation.
+                dnsSdProcess?.destroyForcibly()
+            },
         )
 
         try {
@@ -58,7 +63,7 @@ internal actual suspend fun <T> withTransport(
 
 /**
  * Reads dns-sd browse output and sends discovery events.
- * Blocks on readLine() — process destruction (in caller's finally) breaks it.
+ * Blocks on readLine() — destroying the process unblocks it (readLine returns null).
  */
 private fun readDnsSdOutput(
     process: Process,

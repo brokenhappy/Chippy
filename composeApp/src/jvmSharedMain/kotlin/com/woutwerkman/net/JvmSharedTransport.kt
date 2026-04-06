@@ -1,66 +1,55 @@
 package com.woutwerkman.net
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.SendChannel
-import kotlinx.coroutines.withContext
-import java.net.*
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.nio.channels.ClosedByInterruptException
+import java.nio.channels.DatagramChannel
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceEvent
 import javax.jmdns.ServiceInfo
 import javax.jmdns.ServiceListener
 
-/**
- * Creates and configures a UDP socket, preferring [MESSAGE_PORT] but falling back to a random port.
- */
-internal fun createUdpSocket(peerId: String): DatagramSocket {
-    fun DatagramSocket.configure() = apply {
-        reuseAddress = true
-        broadcast = true
-        // 100ms receive timeout: makes the blocking receive() return periodically so the
-        // coroutine can check for cancellation. Lower = more responsive shutdown, higher =
-        // less CPU. 100ms is a good balance — cancellation feels instant to humans.
-        soTimeout = 100
-    }
-    return try {
-        DatagramSocket(MESSAGE_PORT).configure()
-    } catch (e: Exception) {
-        println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
-        DatagramSocket(0).configure()
-    }
-}
+internal actual class UdpSocket(val channel: DatagramChannel)
 
-internal fun sendUdp(udpSocket: DatagramSocket, address: String, port: Int, message: String) {
-    try {
-        val data = message.toByteArray(Charsets.UTF_8)
-        val packet = DatagramPacket(data, data.size, InetAddress.getByName(address), port)
-        udpSocket.send(packet)
-    } catch (_: Exception) {}
-}
-
-/**
- * Blocking receive loop that forwards raw UDP packets to [receivedPackets].
- * Must run on [Dispatchers.IO] — the socket's soTimeout (100ms) allows cancellation checks.
- */
-internal suspend fun listenForPackets(
-    udpSocket: DatagramSocket,
+internal actual suspend fun <T> withUdpSocket(
     peerId: String,
-    receivedPackets: SendChannel<ReceivedPacket>,
-) {
-    val buffer = ByteArray(65535)
-    while (true) {
-        try {
-            val packet = DatagramPacket(buffer, buffer.size)
-            withContext(Dispatchers.IO) { udpSocket.receive(packet) }
-            val message = String(packet.data, 0, packet.length, Charsets.UTF_8)
-            receivedPackets.send(ReceivedPacket(message, packet.address.hostAddress ?: "", packet.port))
-        } catch (_: SocketTimeoutException) {
-            // Expected: soTimeout (100ms) fires to allow cancellation checks
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            println("[PeerNet-$peerId] Receive error: ${e.message}")
-        }
+    block: suspend CoroutineScope.(UdpSocket) -> T,
+): T = DatagramChannel.open().apply {
+    socket().broadcast = true
+    try {
+        bind(InetSocketAddress(MESSAGE_PORT))
+    } catch (_: Exception) {
+        println("[PeerNet-$peerId] Port $MESSAGE_PORT busy, using random port")
+        bind(InetSocketAddress(0))
+    }
+}.use { channel ->
+    coroutineScope { block(UdpSocket(channel)) }
+}
+
+internal actual val UdpSocket.localPort: Int
+    get() = (channel.localAddress as InetSocketAddress).port
+
+internal actual fun UdpSocket.send(address: String, port: Int, message: String) {
+    channel.send(ByteBuffer.wrap(message.toByteArray()), InetSocketAddress(address, port))
+}
+
+internal actual fun UdpSocket.receivedPackets(): Flow<ReceivedPacket> = flow {
+    val buffer = ByteBuffer.allocate(65535)
+    while (currentCoroutineContext().isActive) {
+        buffer.clear()
+        val sender = runInterruptible { channel.receive(buffer) } as InetSocketAddress
+        buffer.flip()
+        val message = Charsets.UTF_8.decode(buffer).toString()
+        emit(ReceivedPacket(message, sender.address.hostAddress ?: "", sender.port))
     }
 }
 

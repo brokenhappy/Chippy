@@ -2,6 +2,7 @@ package com.woutwerkman.net
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.flow.Flow
 
 /**
  * A raw UDP packet received on the transport.
@@ -20,12 +21,41 @@ internal sealed class ServiceDiscoveryEvent {
     data class Removed(val serviceName: String) : ServiceDiscoveryEvent()
 }
 
+// ==================== UdpSocket expect API ====================
+
+internal expect class UdpSocket
+
+/** Structured resource: creates, binds, and closes a UDP socket. */
+internal expect suspend fun <T> withUdpSocket(
+    peerId: String,
+    block: suspend CoroutineScope.(UdpSocket) -> T,
+): T
+
+internal expect val UdpSocket.localPort: Int
+
+/**
+ * Fire-and-forget UDP send. Not suspend — sendto/DatagramChannel.send are
+ * near-instant for single datagrams and not cancellable on any platform.
+ * Silently swallows errors (best-effort delivery, like UDP itself).
+ */
+internal expect fun UdpSocket.send(address: String, port: Int, message: String)
+
+/**
+ * Cold flow of incoming packets. Runs the platform receive loop when collected.
+ * Truly cancellable on all platforms:
+ * - JVM: blocking DatagramChannel.receive() + runInterruptible (InterruptibleChannel)
+ * - iOS: non-blocking recvfrom + delay-based polling
+ */
+internal expect fun UdpSocket.receivedPackets(): Flow<ReceivedPacket>
+
+// ==================== TransportHandle ====================
+
 /**
  * Platform-specific UDP transport and service discovery.
  *
  * Each platform creates a UDP socket, registers an mDNS/Bonjour service, and provides
- * channels for discovery events and received packets. The handshake protocol consumes
- * these channels and uses [sendUdp] to respond.
+ * channels for discovery events and a flow of received packets. The handshake protocol
+ * consumes these and uses [sendUdp] to respond.
  */
 internal class TransportHandle(
     val localAddress: String,
@@ -33,7 +63,7 @@ internal class TransportHandle(
     /** Service discovery events (peers appearing/disappearing on the network). */
     val discoveryEvents: ReceiveChannel<ServiceDiscoveryEvent>,
     /** Raw UDP packets received on this transport. */
-    val receivedPackets: ReceiveChannel<ReceivedPacket>,
+    val receivedPackets: Flow<ReceivedPacket>,
     /** Send a raw UDP message to address:port. Fire-and-forget. */
     val sendUdp: (address: String, port: Int, message: String) -> Unit,
     /**

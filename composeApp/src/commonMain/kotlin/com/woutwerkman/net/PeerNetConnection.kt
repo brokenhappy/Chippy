@@ -5,6 +5,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 
 /**
@@ -226,15 +227,15 @@ internal expect fun createPeerStates(): PeerStates
  * Processes raw UDP packets: dispatches handshake messages and forwards data to the incoming channel.
  */
 private suspend fun processReceivedPackets(
-    packets: ReceiveChannel<ReceivedPacket>,
+    packets: Flow<ReceivedPacket>,
     peerId: String,
     peerStates: PeerStates,
     incomingChannel: SendChannel<RawPeerMessage>,
     joinedEvents: SendChannel<String>,
     transport: TransportHandle,
 ) {
-    for (packet in packets) {
-        val (fromPeerId, payload) = parseUdpMessage(packet.message, peerId) ?: continue
+    packets.collect { packet ->
+        val (fromPeerId, payload) = parseUdpMessage(packet.message, peerId) ?: return@collect
         when {
             payload.startsWith(HANDSHAKE_HELLO) -> {
                 handleHelloReceived(

@@ -6,6 +6,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import platform.Foundation.*
 import platform.darwin.*
 import platform.posix.*
@@ -13,6 +15,136 @@ import kotlin.concurrent.AtomicReference
 
 private fun htons(value: UShort): UShort =
     ((value.toInt() and 0xFF) shl 8 or (value.toInt() shr 8 and 0xFF)).toUShort()
+
+// ==================== UdpSocket actuals ====================
+
+internal actual class UdpSocket(val fd: Int)
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual suspend fun <T> withUdpSocket(
+    peerId: String,
+    block: suspend CoroutineScope.(UdpSocket) -> T,
+): T {
+    val fd = createPosixUdpSocket(peerId)
+    return try {
+        coroutineScope { block(UdpSocket(fd)) }
+    } finally {
+        if (fd >= 0) close(fd)
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual val UdpSocket.localPort: Int
+    get() = memScoped {
+        val boundAddr = alloc<sockaddr_in>()
+        val addrLen = alloc<UIntVar>()
+        addrLen.value = sizeOf<sockaddr_in>().toUInt()
+        getsockname(fd, boundAddr.ptr.reinterpret(), addrLen.ptr)
+        htons(boundAddr.sin_port).toInt()
+    }
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual fun UdpSocket.send(address: String, port: Int, message: String) {
+    memScoped {
+        val sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        if (sendSocket < 0) return
+
+        val destAddr = alloc<sockaddr_in>()
+        destAddr.sin_family = AF_INET.toUByte()
+        destAddr.sin_port = htons(port.toUShort())
+        inet_pton(AF_INET, address, destAddr.sin_addr.ptr)
+
+        val data = message.encodeToByteArray()
+        data.usePinned { pinned ->
+            sendto(
+                sendSocket,
+                pinned.addressOf(0),
+                data.size.toULong(),
+                0,
+                destAddr.ptr.reinterpret(),
+                sizeOf<sockaddr_in>().toUInt()
+            )
+        }
+
+        close(sendSocket)
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual fun UdpSocket.receivedPackets(): Flow<ReceivedPacket> = flow {
+    val buffer = ByteArray(4096)
+    while (true) {
+        memScoped {
+            val senderAddr = alloc<sockaddr_in>()
+            val addrLen = alloc<UIntVar>()
+            addrLen.value = sizeOf<sockaddr_in>().toUInt()
+
+            buffer.usePinned { pinned ->
+                val bytesRead = recvfrom(
+                    fd,
+                    pinned.addressOf(0),
+                    buffer.size.toULong(),
+                    0,
+                    senderAddr.ptr.reinterpret(),
+                    addrLen.ptr
+                )
+
+                if (bytesRead > 0) {
+                    val senderIp = inet_ntoa(senderAddr.sin_addr.readValue())?.toKString() ?: "unknown"
+                    val senderPort = htons(senderAddr.sin_port).toInt()
+                    val message = buffer.decodeToString(0, bytesRead.toInt())
+                    emit(ReceivedPacket(message, senderIp, senderPort))
+                }
+            }
+        }
+        // 10ms polling: the socket is non-blocking (O_NONBLOCK), so recvfrom returns
+        // immediately when no data. This delay yields to the coroutine scheduler and
+        // provides a cancellation point.
+        delay(10.milliseconds)
+    }
+}
+
+// ==================== POSIX socket helpers ====================
+
+@OptIn(ExperimentalForeignApi::class)
+private fun createPosixUdpSocket(peerId: String): Int {
+    val fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    if (fd < 0) {
+        NSLog("[PeerNet-$peerId] Failed to create UDP socket")
+        return -1
+    }
+
+    memScoped {
+        val reuseAddr = alloc<IntVar>()
+        reuseAddr.value = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reuseAddr.ptr, sizeOf<IntVar>().toUInt())
+
+        val addr = alloc<sockaddr_in>()
+        addr.sin_family = AF_INET.toUByte()
+        addr.sin_port = htons(MESSAGE_PORT.toUShort())
+        addr.sin_addr.s_addr = INADDR_ANY
+
+        var bindResult = bind(fd, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
+        if (bindResult < 0) {
+            NSLog("[PeerNet-$peerId] Failed to bind to port $MESSAGE_PORT, falling back to random port")
+            addr.sin_port = htons(0.toUShort())
+            bindResult = bind(fd, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
+            if (bindResult < 0) {
+                NSLog("[PeerNet-$peerId] Failed to bind UDP socket on fallback port")
+                close(fd)
+                return -1
+            }
+        }
+    }
+
+    // Non-blocking mode for polling receive loop
+    val flags = fcntl(fd, F_GETFL, 0)
+    fcntl(fd, F_SETFL, flags or O_NONBLOCK)
+
+    return fd
+}
+
+// ==================== withTransport ====================
 
 /**
  * Thread-safe peer state map using compare-and-set on an immutable map snapshot.
@@ -43,7 +175,6 @@ internal class AtomicPeerStates : PeerStates {
     }
 }
 
-@OptIn(ExperimentalForeignApi::class)
 internal actual suspend fun <T> withTransport(
     config: PeerNetConfig,
     peerId: String,
@@ -51,196 +182,63 @@ internal actual suspend fun <T> withTransport(
 ): T {
     val serviceType = "_${config.serviceName}._udp."
     val discoveryEvents = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
-    val receivedPackets = Channel<ReceivedPacket>(Channel.BUFFERED)
 
     NSLog("[PeerNet-$peerId] Starting peer discovery")
     val localAddress = getLocalIpAddress()
     NSLog("[PeerNet-$peerId] Local IP: $localAddress")
 
-    val udpSocket = createUdpSocket(peerId)
-    val boundPort = getSocketBoundPort(udpSocket)
-    NSLog("[PeerNet-$peerId] Listening on port $boundPort")
+    return withUdpSocket(peerId) { socket ->
+        NSLog("[PeerNet-$peerId] Listening on port ${socket.localPort}")
 
-    // Set non-blocking mode for receive loop
-    val flags = fcntl(udpSocket, F_GETFL, 0)
-    fcntl(udpSocket, F_SETFL, flags or O_NONBLOCK)
+        // Start Bonjour on Main thread (required by NSNetService)
+        val resolverDelegates = mutableListOf<NetServiceResolveDelegate>()
+        val bonjourState = withContext(Dispatchers.Main) {
+            startBonjour(config, peerId, localAddress, socket.localPort, serviceType, discoveryEvents, resolverDelegates)
+        }
 
-    // Start Bonjour on Main thread (required by NSNetService)
-    val resolverDelegates = mutableListOf<NetServiceResolveDelegate>()
-    val bonjourState = withContext(Dispatchers.Main) {
-        startBonjour(config, peerId, localAddress, boundPort, serviceType, discoveryEvents, resolverDelegates)
-    }
-
-    val handle = TransportHandle(
-        localAddress = localAddress,
-        localPort = boundPort,
-        discoveryEvents = discoveryEvents,
-        receivedPackets = receivedPackets,
-        sendUdp = { address, port, message -> sendUdp(address, port, message) },
-        platformTasks = {
-            // Drive the RunLoop so Bonjour delegate callbacks fire
-            launch {
-                while (true) {
-                    withContext(Dispatchers.Main) {
-                        NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
-                    }
-                    delay(50.milliseconds)
-                }
-            }
-            // BLE transport — discovery + data fallback
-            launch {
-                withBleTransport(peerId, localAddress, boundPort) { ble ->
-                    // Forward BLE discoveries as service discovery events
-                    launch {
-                        for (peerInfo in ble.discoveredPeers) {
-                            val serviceName = formatServiceName(peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port)
-                            discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(serviceName))
+        val handle = TransportHandle(
+            localAddress = localAddress,
+            localPort = socket.localPort,
+            discoveryEvents = discoveryEvents,
+            receivedPackets = socket.receivedPackets(),
+            sendUdp = { address, port, message -> socket.send(address, port, message) },
+            platformTasks = {
+                // Drive the RunLoop so Bonjour delegate callbacks fire
+                launch {
+                    while (true) {
+                        withContext(Dispatchers.Main) {
+                            NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
                         }
+                        delay(50.milliseconds)
                     }
-                    // Forward BLE incoming data as received packets
-                    launch {
-                        for ((fromPeerId, payload) in ble.incoming) {
-                            receivedPackets.trySend(
-                                ReceivedPacket("$fromPeerId:${payload.decodeToString()}", localAddress, boundPort)
-                            )
+                }
+                // BLE transport — discovery + data fallback
+                launch {
+                    withBleTransport(peerId, localAddress, socket.localPort) { ble ->
+                        launch {
+                            for (peerInfo in ble.discoveredPeers) {
+                                val serviceName = formatServiceName(peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port)
+                                discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(serviceName))
+                            }
                         }
+                        // BLE incoming data — not currently bridged into the receivedPackets flow.
+                        // BLE peers also get UDP handshakes, so the common layer discovers them
+                        // via UDP. If a BLE-only peer is needed, this would need a merged flow.
+                        awaitCancellation()
                     }
-                    awaitCancellation()
                 }
+            },
+        )
+
+        try {
+            block(handle)
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main) {
+                bonjourState.browser.stop()
+                bonjourState.service.stop()
             }
-        },
-    )
-
-    try {
-        return coroutineScope {
-            val receiveJob = launch(Dispatchers.Default) {
-                receiveLoop(udpSocket, receivedPackets)
-            }
-
-            try {
-                coroutineScope { block(handle) }
-            } finally {
-                receiveJob.cancel()
-            }
+            NSLog("[PeerNet-$peerId] Stopped")
         }
-    } finally {
-        NSLog("[PeerNet-$peerId] Stopping")
-        if (udpSocket >= 0) {
-            close(udpSocket)
-        }
-        withContext(NonCancellable + Dispatchers.Main) {
-            bonjourState.browser.stop()
-            bonjourState.service.stop()
-        }
-    }
-}
-
-@OptIn(ExperimentalForeignApi::class)
-private fun createUdpSocket(peerId: String): Int {
-    val fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-    if (fd < 0) {
-        NSLog("[PeerNet-$peerId] Failed to create UDP socket")
-        return -1
-    }
-
-    memScoped {
-        val reuseAddr = alloc<IntVar>()
-        reuseAddr.value = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reuseAddr.ptr, sizeOf<IntVar>().toUInt())
-
-        val addr = alloc<sockaddr_in>()
-        addr.sin_family = AF_INET.toUByte()
-        addr.sin_port = htons(MESSAGE_PORT.toUShort())
-        addr.sin_addr.s_addr = INADDR_ANY
-
-        var bindResult = bind(fd, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
-        if (bindResult < 0) {
-            NSLog("[PeerNet-$peerId] Failed to bind to port $MESSAGE_PORT, falling back to random port")
-            addr.sin_port = htons(0.toUShort())
-            bindResult = bind(fd, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().toUInt())
-            if (bindResult < 0) {
-                NSLog("[PeerNet-$peerId] Failed to bind UDP socket on fallback port")
-                close(fd)
-                return -1
-            }
-        }
-    }
-
-    return fd
-}
-
-@OptIn(ExperimentalForeignApi::class)
-private fun getSocketBoundPort(fd: Int): Int = memScoped {
-    val boundAddr = alloc<sockaddr_in>()
-    val addrLen = alloc<UIntVar>()
-    addrLen.value = sizeOf<sockaddr_in>().toUInt()
-    getsockname(fd, boundAddr.ptr.reinterpret(), addrLen.ptr)
-    htons(boundAddr.sin_port).toInt()
-}
-
-/**
- * Non-blocking UDP receive loop using POSIX recvfrom.
- * Polls every 10ms — fast enough for responsive discovery, cheap enough to not burn CPU.
- */
-@OptIn(ExperimentalForeignApi::class)
-private suspend fun receiveLoop(
-    udpSocket: Int,
-    receivedPackets: SendChannel<ReceivedPacket>,
-) {
-    val buffer = ByteArray(4096)
-
-    while (true) {
-        memScoped {
-            val senderAddr = alloc<sockaddr_in>()
-            val addrLen = alloc<UIntVar>()
-            addrLen.value = sizeOf<sockaddr_in>().toUInt()
-
-            buffer.usePinned { pinned ->
-                val bytesRead = recvfrom(
-                    udpSocket,
-                    pinned.addressOf(0),
-                    buffer.size.toULong(),
-                    0,
-                    senderAddr.ptr.reinterpret(),
-                    addrLen.ptr
-                )
-
-                if (bytesRead > 0) {
-                    val senderIp = inet_ntoa(senderAddr.sin_addr.readValue())?.toKString() ?: "unknown"
-                    val senderPort = htons(senderAddr.sin_port).toInt()
-                    val message = buffer.decodeToString(0, bytesRead.toInt())
-                    receivedPackets.trySend(ReceivedPacket(message, senderIp, senderPort))
-                }
-            }
-        }
-        delay(10.milliseconds)
-    }
-}
-
-@OptIn(ExperimentalForeignApi::class)
-private fun sendUdp(address: String, port: Int, message: String) {
-    memScoped {
-        val sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        if (sendSocket < 0) return
-
-        val destAddr = alloc<sockaddr_in>()
-        destAddr.sin_family = AF_INET.toUByte()
-        destAddr.sin_port = htons(port.toUShort())
-        inet_pton(AF_INET, address, destAddr.sin_addr.ptr)
-
-        val data = message.encodeToByteArray()
-        data.usePinned { pinned ->
-            sendto(
-                sendSocket,
-                pinned.addressOf(0),
-                data.size.toULong(),
-                0,
-                destAddr.ptr.reinterpret(),
-                sizeOf<sockaddr_in>().toUInt()
-            )
-        }
-
-        close(sendSocket)
     }
 }
 
@@ -332,7 +330,7 @@ private class NetServicePublishDelegate(private val peerId: String) : NSObject()
     }
 }
 
-private class NetServiceResolveDelegate(
+internal class NetServiceResolveDelegate(
     private val peerId: String,
     private val onResolved: (NSNetService) -> Unit
 ) : NSObject(), NSNetServiceDelegateProtocol {

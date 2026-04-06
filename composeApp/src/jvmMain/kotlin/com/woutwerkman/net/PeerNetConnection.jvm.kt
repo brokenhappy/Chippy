@@ -12,58 +12,47 @@ internal actual suspend fun <T> withTransport(
 ): T {
     val serviceType = "_${config.serviceName}._udp.local."
     val discoveryEvents = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
-    val receivedPackets = Channel<ReceivedPacket>(Channel.BUFFERED)
 
     val localAddress = getLocalIpAddress()
     println("[PeerNet-$peerId] Local IP: $localAddress")
 
-    val udpSocket = createUdpSocket(peerId)
-    val localPort = udpSocket.localPort
-    println("[PeerNet-$peerId] Bound to port $localPort")
+    return withUdpSocket(peerId) { socket ->
+        println("[PeerNet-$peerId] Bound to port ${socket.localPort}")
 
-    val jmdns = startJmdns(peerId, localAddress, localPort, serviceType, config.displayName, discoveryEvents)
+        val jmdns = startJmdns(
+            peerId, localAddress, socket.localPort, serviceType, config.displayName, discoveryEvents,
+            jmdnsHostname = "peer-jvm-$peerId",
+        )
 
-    val isMac = System.getProperty("os.name").lowercase().contains("mac")
-    val dnsSdProcess: Process? = if (isMac) {
-        ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
-            .redirectErrorStream(true)
-            .start()
-    } else null
+        val isMac = System.getProperty("os.name").lowercase().contains("mac")
+        val dnsSdProcess: Process? = if (isMac) {
+            ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
+                .redirectErrorStream(true)
+                .start()
+        } else null
 
-    val handle = TransportHandle(
-        localAddress = localAddress,
-        localPort = localPort,
-        discoveryEvents = discoveryEvents,
-        receivedPackets = receivedPackets,
-        sendUdp = { address, port, message -> sendUdp(udpSocket, address, port, message) },
-        platformTasks = {
-            if (dnsSdProcess != null) {
-                launch(Dispatchers.IO) {
-                    readDnsSdOutput(dnsSdProcess, config.serviceName, peerId, discoveryEvents)
+        val handle = TransportHandle(
+            localAddress = localAddress,
+            localPort = socket.localPort,
+            discoveryEvents = discoveryEvents,
+            receivedPackets = socket.receivedPackets(),
+            sendUdp = { address, port, message -> socket.send(address, port, message) },
+            platformTasks = {
+                if (dnsSdProcess != null) {
+                    launch(Dispatchers.IO) {
+                        readDnsSdOutput(dnsSdProcess, config.serviceName, peerId, discoveryEvents)
+                    }
                 }
-            }
-        },
-    )
+            },
+        )
 
-    try {
-        return coroutineScope {
-            val receiveJob = launch(Dispatchers.IO) {
-                listenForPackets(udpSocket, peerId, receivedPackets)
-            }
-
-            try {
-                coroutineScope { block(handle) }
-            } finally {
-                dnsSdProcess?.destroyForcibly()
-                receiveJob.cancel()
-            }
+        try {
+            block(handle)
+        } finally {
+            dnsSdProcess?.destroyForcibly()
+            try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
+            println("[PeerNet-$peerId] Stopped")
         }
-    } finally {
-        println("[PeerNet-$peerId] Stopping")
-        try { dnsSdProcess?.destroyForcibly() } catch (_: Exception) {}
-        try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
-        try { udpSocket.close() } catch (_: Exception) {}
-        println("[PeerNet-$peerId] Stopped")
     }
 }
 

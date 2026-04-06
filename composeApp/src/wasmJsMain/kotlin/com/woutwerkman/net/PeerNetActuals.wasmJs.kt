@@ -1,6 +1,22 @@
 package com.woutwerkman.net
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
+
+internal actual class UdpSocket
+
+internal actual suspend fun <T> withUdpSocket(
+    peerId: String,
+    block: suspend CoroutineScope.(UdpSocket) -> T,
+): T = error("UDP not supported on web")
+
+internal actual val UdpSocket.localPort: Int get() = error("UDP not supported on web")
+
+internal actual fun UdpSocket.send(address: String, port: Int, message: String): Unit =
+    error("UDP not supported on web")
+
+internal actual fun UdpSocket.receivedPackets(): Flow<ReceivedPacket> =
+    error("UDP not supported on web")
 
 internal actual fun generatePeerId(): String = error("Not supported on web")
 

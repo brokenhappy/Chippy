@@ -60,12 +60,10 @@ internal actual suspend fun <T> withTransport(
             }
         }
     } finally {
-        withContext(NonCancellable) {
-            println("[PeerNet-$peerId] Stopping")
-            try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
-            try { udpSocket.close() } catch (_: Exception) {}
-            println("[PeerNet-$peerId] Stopped")
-        }
+        println("[PeerNet-$peerId] Stopping")
+        try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
+        try { udpSocket.close() } catch (_: Exception) {}
+        println("[PeerNet-$peerId] Stopped")
     }
 }
 

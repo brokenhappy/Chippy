@@ -66,12 +66,14 @@ private fun PhaseIndicator(phase: ConnectivityTestPhase) {
         when (phase) {
             ConnectivityTestPhase.STARTING -> Amber
             ConnectivityTestPhase.DISCOVERING -> Amber
+            ConnectivityTestPhase.WAITING_FOR_SHUTDOWN -> Amber
             ConnectivityTestPhase.DONE -> Green
         }
     )
     val label = when (phase) {
         ConnectivityTestPhase.STARTING -> "Starting"
         ConnectivityTestPhase.DISCOVERING -> "Discovering"
+        ConnectivityTestPhase.WAITING_FOR_SHUTDOWN -> "Waiting for completion signal"
         ConnectivityTestPhase.DONE -> "Done"
     }
 

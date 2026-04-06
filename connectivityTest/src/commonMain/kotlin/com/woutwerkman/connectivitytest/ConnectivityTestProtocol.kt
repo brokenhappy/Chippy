@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 
-enum class ConnectivityTestPhase { STARTING, DISCOVERING, DONE }
+enum class ConnectivityTestPhase { STARTING, DISCOVERING, WAITING_FOR_SHUTDOWN, DONE }
 
 data class ConnectivityTestUiState(
     val instanceId: String = "",
@@ -50,14 +50,15 @@ suspend fun runConnectivityTestProtocol(
             found.containsAll(targets)
         }
 
-        uiState.update { it.copy(phase = ConnectivityTestPhase.DONE) }
         sendLine("DONE")
 
         // Keep the peer connection alive until the coordinator signals SHUTDOWN.
         // Without this, fast platforms tear down their connection before slow platforms
         // have discovered them — the Left event removes the peer from state before the
         // slow platform's state.first { } can observe it.
+        uiState.update { it.copy(phase = ConnectivityTestPhase.WAITING_FOR_SHUTDOWN) }
         readLine() // SHUTDOWN
+        uiState.update { it.copy(phase = ConnectivityTestPhase.DONE) }
     }
 }
 

@@ -38,7 +38,7 @@ class JvmLauncher(
                 if (showUi) showConnectivityTestWindow(uiState)
             }
 
-            launch {
+            val protocolJob = launch {
                 try {
                     runConnectivityTestProtocol(
                         instanceId = instanceId,
@@ -61,7 +61,11 @@ class JvmLauncher(
                 }
             }
 
-            block(toProcess, fromProcess)
-                .also { uiJob.cancel() }
+            try {
+                block(toProcess, fromProcess)
+            } finally {
+                protocolJob.cancel()
+                uiJob.cancel()
+            }
         }
     }

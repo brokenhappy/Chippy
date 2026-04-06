@@ -45,7 +45,7 @@ suspend fun runConnectivityTest(
 ): TestResult = coroutineScope {
     val testState = MutableStateFlow(platforms.associate { it.instanceId to DiscoveryTestState.LAUNCHING })
 
-    platforms.forEach { platform ->
+    val platformJobs = platforms.map { platform ->
         launch(Dispatchers.Default) {
             runPlatformTestLifecycle(platform, platforms.map { it.type }, testState, logger)
         }
@@ -69,6 +69,8 @@ suspend fun runConnectivityTest(
     } catch (e: Exception) {
         logger("FAILURE: ${e.message}")
         TestResult.Failure("Test failed: ${e.message}", e)
+    } finally {
+        platformJobs.forEach { it.cancel() }
     }
 }
 

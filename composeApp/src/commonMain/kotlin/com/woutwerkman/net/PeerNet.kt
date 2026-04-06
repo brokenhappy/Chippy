@@ -566,12 +566,14 @@ suspend fun <T> withPeerNetConnection(
                 // Best-effort: inform all peers we're leaving before the connection closes.
                 // Uses broadcastDirect to bypass the channel (the channel-processing
                 // coroutine is already cancelled at this point).
-                val leftEwt = EventWithTime(
-                    clock.now(), rawConn.localPeerId,
-                    PeerEvent.Left(rawConn.localPeerId),
-                )
-                val payload = "$LIN_EVENT${linJson.encodeToString(leftEwt)}"
-                rawConn.broadcastDirect(payload.encodeToByteArray())
+                try {
+                    val leftEwt = EventWithTime(
+                        clock.now(), rawConn.localPeerId,
+                        PeerEvent.Left(rawConn.localPeerId),
+                    )
+                    val payload = "$LIN_EVENT${linJson.encodeToString(leftEwt)}"
+                    rawConn.broadcastDirect(payload.encodeToByteArray())
+                } catch (_: Exception) {}
             }
         }
     }

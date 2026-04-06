@@ -44,12 +44,18 @@ internal actual fun UdpSocket.send(address: String, port: Int, message: String) 
 
 internal actual fun UdpSocket.receivedPackets(): Flow<ReceivedPacket> = flow {
     val buffer = ByteBuffer.allocate(65535)
-    while (currentCoroutineContext().isActive) {
-        buffer.clear()
-        val sender = runInterruptible { channel.receive(buffer) } as InetSocketAddress
-        buffer.flip()
-        val message = Charsets.UTF_8.decode(buffer).toString()
-        emit(ReceivedPacket(message, sender.address.hostAddress ?: "", sender.port))
+    try {
+        while (currentCoroutineContext().isActive) {
+            buffer.clear()
+            val sender = runInterruptible { channel.receive(buffer) } as InetSocketAddress
+            buffer.flip()
+            val message = Charsets.UTF_8.decode(buffer).toString()
+            emit(ReceivedPacket(message, sender.address.hostAddress ?: "", sender.port))
+        }
+    } catch (_: java.nio.channels.ClosedByInterruptException) {
+        // Expected on cancellation — runInterruptible interrupts the thread,
+        // which closes the InterruptibleChannel. Not a CancellationException,
+        // so we catch it to avoid poisoning the parent scope.
     }
 }
 
@@ -97,12 +103,13 @@ internal actual suspend fun <T> withServiceDiscovery(
     return try {
         coroutineScope { block(sd) }
     } finally {
-        try {
-            jmdns.unregisterService(serviceInfo)
-            jmdns.close()
-        } catch (_: Exception) {
-
-        }
+        // JmDNS cleanup (unregister + close) blocks for seconds while sending goodbye
+        // packets and waiting for internal threads to wind down. Run it all on a daemon
+        // thread so coroutine cancellation/completion isn't blocked.
+        Thread {
+            try { jmdns.unregisterService(serviceInfo) } catch (_: Exception) {}
+            try { jmdns.close() } catch (_: Exception) {}
+        }.apply { isDaemon = true }.start()
     }
 }
 

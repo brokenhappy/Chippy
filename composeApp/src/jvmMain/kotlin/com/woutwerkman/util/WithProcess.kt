@@ -28,7 +28,18 @@ suspend fun <T> withProcess(
     val stderrFuture = if (builder.redirectErrorStream()) null
     else CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
     try {
-        val result = coroutineScope { block(process) }
+        val result = coroutineScope {
+            // Sentinel: kills the process immediately when the scope is cancelled.
+            // InputStream.read() is NOT interruptible via Thread.interrupt(), so blocking
+            // reads in the block can't respond to coroutine cancellation on their own.
+            // Killing the process closes its streams, unblocking the reads.
+            val processGuard = launch {
+                try { awaitCancellation() }
+                finally { process.destroyForcibly() }
+            }
+            try { block(process) }
+            finally { processGuard.cancel() }
+        }
         if (!process.isAlive) {
             val exitCode = process.exitValue()
             if (exitCode != 0) {

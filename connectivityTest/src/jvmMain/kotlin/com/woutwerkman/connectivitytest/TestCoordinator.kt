@@ -37,7 +37,6 @@ enum class DiscoveryTestState { LAUNCHING, READY, DONE }
  * Each platform runner manages its own transport (in-process channels, TCP, etc.).
  * This function only orchestrates the READY → START → DONE protocol.
  */
-@OptIn(DelicateCoroutinesApi::class)
 suspend fun runConnectivityTest(
     platforms: List<PlatformConfig>,
     spinUpTimeout: Duration,
@@ -46,35 +45,30 @@ suspend fun runConnectivityTest(
 ): TestResult {
     val testState = MutableStateFlow(platforms.associate { it.instanceId to DiscoveryTestState.LAUNCHING })
 
-    // Launch platform lifecycles in GlobalScope so their cleanup doesn't block
-    // the caller. External processes (devicectl, simctl) and JmDNS can take 10+ seconds
-    // to shut down, but the test result is known as soon as all platforms report DONE.
-    val platformJobs = platforms.map { platform ->
-        GlobalScope.launch {
-            runPlatformTestLifecycle(platform, platforms.map { it.type }, testState, logger)
-        }
-    }
-
     return try {
-        withTimeoutOrNull(spinUpTimeout) {
-            testState.waitForAllPlatformsToBeReadyForDiscovery()
-        } ?: throw spinUpTimeoutError(testState.value)
+        coroutineScope {
+            for (platform in platforms) {
+                launch { runPlatformTestLifecycle(platform, platforms.map { it.type }, testState, logger) }
+            }
 
-        logger("All ${platforms.size} platforms ready — sending START")
+            withTimeoutOrNull(spinUpTimeout) {
+                testState.waitForAllPlatformsToBeReadyForDiscovery()
+            } ?: throw spinUpTimeoutError(testState.value)
 
-        withTimeoutOrNull(discoveryTimeout) {
-            testState.waitForAllPlatformsToFinishDiscovery()
-        } ?: throw discoveryTimeoutError(testState.value)
+            logger("All ${platforms.size} platforms ready — sending START")
 
-        logger("SUCCESS: All platforms connected!")
-        TestResult.Success
+            withTimeoutOrNull(discoveryTimeout) {
+                testState.waitForAllPlatformsToFinishDiscovery()
+            } ?: throw discoveryTimeoutError(testState.value)
+
+            logger("SUCCESS: All platforms connected!")
+            TestResult.Success
+        }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         logger("FAILURE: ${e.message}")
         TestResult.Failure("Test failed: ${e.message}", e)
-    } finally {
-        platformJobs.forEach { it.cancel() }
     }
 }
 
@@ -97,15 +91,6 @@ private suspend fun runPlatformTestLifecycle(
         waitForDoneSignal(fromProcess, platform.instanceId, logger)
         logger("[${platform.instanceId}] DONE")
         testState.update { it + (platform.instanceId to DiscoveryTestState.DONE) }
-
-        // Wait for ALL platforms to finish discovery before signalling this platform to
-        // tear down. Otherwise fast platforms leave the network before slow platforms
-        // discover them.
-        testState.waitForAllPlatformsToFinishDiscovery()
-        toProcess.send("SHUTDOWN")
-        // Give the TCP writer coroutine time to flush before the ProcessRunner's
-        // finally block cancels it and closes the socket.
-        delay(200)
     }
 }
 

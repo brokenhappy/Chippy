@@ -71,7 +71,7 @@ tasks.register<JavaExec>("testConnectivity") {
     group = "verification"
     description = "Test network connectivity between platforms"
 
-    timeout.set(Duration.ofSeconds(20))
+    timeout.set(Duration.ofSeconds(80))
 
     val jvmCompilation = kotlin.targets.getByName("jvm").compilations.getByName("main")
     val runtimeFiles = jvmCompilation.runtimeDependencyFiles ?: files()

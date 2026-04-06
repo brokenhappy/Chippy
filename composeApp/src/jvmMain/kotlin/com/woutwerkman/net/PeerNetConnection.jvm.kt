@@ -1,64 +1,34 @@
 package com.woutwerkman.net
 
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.SendChannel
 import java.net.*
 
-internal actual suspend fun <T> withTransport(
+internal actual fun createPlatformTransportConfig(
     config: PeerNetConfig,
     peerId: String,
-    block: suspend CoroutineScope.(TransportHandle) -> T,
-): T {
-    val serviceType = "_${config.serviceName}._udp.local."
-    val discoveryEvents = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
+    localAddress: String,
+    socket: UdpSocket,
+    sd: ServiceDiscovery,
+): PlatformTransportConfig {
+    val isMac = System.getProperty("os.name").lowercase().contains("mac")
+    val dnsSdProcess: Process? = if (isMac) {
+        ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
+            .redirectErrorStream(true)
+            .start()
+    } else null
 
-    val localAddress = getLocalIpAddress()
-    println("[PeerNet-$peerId] Local IP: $localAddress")
-
-    return withUdpSocket(peerId) { socket ->
-        println("[PeerNet-$peerId] Bound to port ${socket.localPort}")
-
-        val jmdns = startJmdns(
-            peerId, localAddress, socket.localPort, serviceType, config.displayName, discoveryEvents,
-            jmdnsHostname = "peer-jvm-$peerId",
-        )
-
-        val isMac = System.getProperty("os.name").lowercase().contains("mac")
-        val dnsSdProcess: Process? = if (isMac) {
-            ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
-                .redirectErrorStream(true)
-                .start()
-        } else null
-
-        val handle = TransportHandle(
-            localAddress = localAddress,
-            localPort = socket.localPort,
-            discoveryEvents = discoveryEvents,
-            receivedPackets = socket.receivedPackets(),
-            sendUdp = { address, port, message -> socket.send(address, port, message) },
-            platformTasks = {
-                if (dnsSdProcess != null) {
-                    launch(Dispatchers.IO) {
-                        readDnsSdOutput(dnsSdProcess, config.serviceName, peerId, discoveryEvents)
-                    }
+    return PlatformTransportConfig(
+        platformTasks = {
+            if (dnsSdProcess != null) {
+                launch(Dispatchers.IO) {
+                    readDnsSdOutput(dnsSdProcess, config.serviceName, peerId, sd)
                 }
-            },
-            prepareForTeardown = {
-                // Destroy dns-sd process to unblock its readLine() so the coroutine
-                // can respond to cancellation.
-                dnsSdProcess?.destroyForcibly()
-            },
-        )
-
-        try {
-            block(handle)
-        } finally {
+            }
+        },
+        prepareForTeardown = {
             dnsSdProcess?.destroyForcibly()
-            try { jmdns.unregisterAllServices(); jmdns.close() } catch (_: Exception) {}
-            println("[PeerNet-$peerId] Stopped")
-        }
-    }
+        },
+    )
 }
 
 /**
@@ -69,7 +39,7 @@ private fun readDnsSdOutput(
     process: Process,
     serviceName: String,
     peerId: String,
-    discoveryEvents: SendChannel<ServiceDiscoveryEvent>,
+    sd: ServiceDiscovery,
 ) {
     val browseServiceType = "_${serviceName}._udp."
     val reader = process.inputStream.bufferedReader()
@@ -80,14 +50,14 @@ private fun readDnsSdOutput(
                 val instanceNameStart = line.indexOf(browseServiceType)
                 if (instanceNameStart >= 0) {
                     val instanceName = line.substring(instanceNameStart + browseServiceType.length).trim()
-                    discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(instanceName))
+                    sd.trySendEvent(ServiceDiscoveryEvent.Discovered(instanceName))
                 }
             }
         }
     } catch (_: Exception) {}
 }
 
-private fun getLocalIpAddress(): String {
+internal actual fun getLocalIpAddress(): String {
     try {
         val interfaces = NetworkInterface.getNetworkInterfaces()
         var preferredIp: String? = null

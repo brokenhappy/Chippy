@@ -14,8 +14,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -176,34 +174,4 @@ private suspend fun serveResource(call: ApplicationCall, resources: WebClientRes
         return
     }
     call.respondBytes(bytes, ContentType.parse(resources.contentType(path)))
-}
-
-private fun getLocalIpAddress(): String {
-    try {
-        val interfaces = NetworkInterface.getNetworkInterfaces()
-        var preferredIp: String? = null
-        var fallbackIp: String? = null
-        while (interfaces.hasMoreElements()) {
-            val ni = interfaces.nextElement()
-            if (ni.isLoopback || !ni.isUp) continue
-            val name = ni.name.lowercase()
-            if (name.startsWith("utun") || name.startsWith("tun") || name.startsWith("tap")) continue
-            val addresses = ni.inetAddresses
-            while (addresses.hasMoreElements()) {
-                val addr = addresses.nextElement()
-                if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                    val ip = addr.hostAddress ?: continue
-                    if (ip.startsWith("169.254.") || ip.startsWith("100.64.") || ip.startsWith("100.96.")) continue
-                    if (name == "en0" || name == "eth0") {
-                        preferredIp = ip
-                    } else if (fallbackIp == null) {
-                        fallbackIp = ip
-                    }
-                }
-            }
-        }
-        return preferredIp ?: fallbackIp ?: "127.0.0.1"
-    } catch (_: Exception) {
-        return "127.0.0.1"
-    }
 }

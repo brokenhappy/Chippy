@@ -1,7 +1,8 @@
 package com.woutwerkman.net
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
@@ -52,21 +53,26 @@ internal actual fun UdpSocket.receivedPackets(): Flow<ReceivedPacket> = flow {
     }
 }
 
-/**
- * Creates a JmDNS instance, registers a service, and listens for peer discoveries.
- * Used by both Android and JVM.
- */
-internal fun startJmdns(
+// ==================== ServiceDiscovery actuals ====================
+
+internal actual class ServiceDiscovery(
+    val jmdns: JmDNS,
+    val channel: Channel<ServiceDiscoveryEvent>,
+    val serviceType: String,
+)
+
+internal actual suspend fun <T> withServiceDiscovery(
     peerId: String,
+    serviceName: String,
+    displayName: String,
     localAddress: String,
     localPort: Int,
-    serviceType: String,
-    peerName: String,
-    discoveryEvents: SendChannel<ServiceDiscoveryEvent>,
-    jmdnsHostname: String = localAddress,
-): JmDNS {
+    block: suspend CoroutineScope.(ServiceDiscovery) -> T,
+): T {
+    val serviceType = "_${serviceName}._udp.local."
+    val channel = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
     val inetAddress = InetAddress.getByName(localAddress)
-    val jmdns = JmDNS.create(inetAddress, jmdnsHostname)
+    val jmdns = JmDNS.create(inetAddress, "peer-$peerId")
 
     jmdns.addServiceListener(serviceType, object : ServiceListener {
         override fun serviceAdded(event: ServiceEvent) {
@@ -74,18 +80,35 @@ internal fun startJmdns(
         }
 
         override fun serviceRemoved(event: ServiceEvent) {
-            discoveryEvents.trySend(ServiceDiscoveryEvent.Removed(event.name))
+            channel.trySend(ServiceDiscoveryEvent.Removed(event.name))
         }
 
         override fun serviceResolved(event: ServiceEvent) {
-            discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(event.name))
+            channel.trySend(ServiceDiscoveryEvent.Discovered(event.name))
         }
     })
 
-    val fullServiceName = formatServiceName(peerName, peerId, localAddress, localPort)
+    val fullServiceName = formatServiceName(displayName, peerId, localAddress, localPort)
     val serviceInfo = ServiceInfo.create(serviceType, fullServiceName, localPort, "PeerNet")
     jmdns.registerService(serviceInfo)
     println("[PeerNet-$peerId] mDNS service registered: $fullServiceName")
 
-    return jmdns
+    val sd = ServiceDiscovery(jmdns, channel, serviceType)
+    return try {
+        coroutineScope { block(sd) }
+    } finally {
+        try {
+            jmdns.unregisterService(serviceInfo)
+            jmdns.close()
+        } catch (_: Exception) {
+
+        }
+    }
+}
+
+internal actual val ServiceDiscovery.events: ReceiveChannel<ServiceDiscoveryEvent>
+    get() = channel
+
+internal actual fun ServiceDiscovery.trySendEvent(event: ServiceDiscoveryEvent) {
+    channel.trySend(event)
 }

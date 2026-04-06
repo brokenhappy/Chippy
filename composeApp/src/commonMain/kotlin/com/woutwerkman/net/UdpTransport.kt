@@ -48,14 +48,36 @@ internal expect fun UdpSocket.send(address: String, port: Int, message: String)
  */
 internal expect fun UdpSocket.receivedPackets(): Flow<ReceivedPacket>
 
+// ==================== ServiceDiscovery expect API ====================
+
+internal expect class ServiceDiscovery
+
+/**
+ * Structured resource: registers an mDNS/Bonjour service, browses for peers of the same
+ * service type, and tears everything down when [block] completes.
+ */
+internal expect suspend fun <T> withServiceDiscovery(
+    peerId: String,
+    serviceName: String,
+    displayName: String,
+    localAddress: String,
+    localPort: Int,
+    block: suspend CoroutineScope.(ServiceDiscovery) -> T,
+): T
+
+/** Channel of discovery/removal events from the network. */
+internal expect val ServiceDiscovery.events: ReceiveChannel<ServiceDiscoveryEvent>
+
+/** Inject an additional discovery event (for platform-specific fallback mechanisms). */
+internal expect fun ServiceDiscovery.trySendEvent(event: ServiceDiscoveryEvent)
+
 // ==================== TransportHandle ====================
 
 /**
- * Platform-specific UDP transport and service discovery.
+ * UDP transport and service discovery handle.
  *
- * Each platform creates a UDP socket, registers an mDNS/Bonjour service, and provides
- * channels for discovery events and a flow of received packets. The handshake protocol
- * consumes these and uses [sendUdp] to respond.
+ * Provides raw transport operations for the handshake protocol in
+ * [withRawPeerNetConnectionImpl] to discover and connect peers.
  */
 internal class TransportHandle(
     val localAddress: String,
@@ -82,14 +104,61 @@ internal class TransportHandle(
 )
 
 /**
- * Platform-specific setup: creates a UDP socket, registers an mDNS/Bonjour service, starts
- * receive loops and discovery listeners. Tears down everything when [block] completes.
+ * Platform-specific extras for [withTransport]: tasks to run alongside the handshake
+ * protocol and a teardown hook for releasing blocking resources.
+ */
+internal class PlatformTransportConfig(
+    val platformTasks: (suspend CoroutineScope.() -> Unit)? = null,
+    val prepareForTeardown: () -> Unit = {},
+)
+
+/**
+ * Creates platform-specific transport configuration.
+ * JVM: dns-sd process fallback on macOS.
+ * Android: mDNS polling fallback, emulator gateway probing, BLE.
+ * iOS: RunLoop driving for Bonjour callbacks, BLE.
+ */
+internal expect fun createPlatformTransportConfig(
+    config: PeerNetConfig,
+    peerId: String,
+    localAddress: String,
+    socket: UdpSocket,
+    sd: ServiceDiscovery,
+): PlatformTransportConfig
+
+/** Platform-specific local IP address discovery. */
+internal expect fun getLocalIpAddress(): String
+
+/**
+ * Creates a UDP socket, registers an mDNS/Bonjour service, starts receive loops and
+ * discovery listeners. Tears down everything when [block] completes.
  *
  * The [TransportHandle] provides raw transport operations. The common handshake protocol
  * in [withRawPeerNetConnectionImpl] consumes these to establish peer connections.
  */
-internal expect suspend fun <T> withTransport(
+internal suspend fun <T> withTransport(
     config: PeerNetConfig,
     peerId: String,
     block: suspend CoroutineScope.(TransportHandle) -> T,
-): T
+): T {
+    val localAddress = getLocalIpAddress()
+    println("[PeerNet-$peerId] Local IP: $localAddress")
+
+    return withUdpSocket(peerId) { socket ->
+        println("[PeerNet-$peerId] Bound to port ${socket.localPort}")
+
+        withServiceDiscovery(peerId, config.serviceName, config.displayName, localAddress, socket.localPort) { sd ->
+            val platformConfig = createPlatformTransportConfig(config, peerId, localAddress, socket, sd)
+            val handle = TransportHandle(
+                localAddress = localAddress,
+                localPort = socket.localPort,
+                discoveryEvents = sd.events,
+                receivedPackets = socket.receivedPackets(),
+                sendUdp = { address, port, message -> socket.send(address, port, message) },
+                platformTasks = platformConfig.platformTasks,
+                prepareForTeardown = platformConfig.prepareForTeardown,
+            )
+            block(handle)
+        }
+    }
+}

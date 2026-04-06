@@ -5,7 +5,7 @@ import platform.darwin.*
 import platform.posix.*
 
 @OptIn(ExperimentalForeignApi::class)
-internal fun getLocalIpAddress(): String {
+internal actual fun getLocalIpAddress(): String {
     memScoped {
         val ifaddrsVar = alloc<CPointerVar<ifaddrs>>()
         if (getifaddrs(ifaddrsVar.ptr) == 0) {

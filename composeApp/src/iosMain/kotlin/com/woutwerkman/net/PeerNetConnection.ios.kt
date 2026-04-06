@@ -4,7 +4,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -144,7 +144,83 @@ private fun createPosixUdpSocket(peerId: String): Int {
     return fd
 }
 
-// ==================== withTransport ====================
+// ==================== ServiceDiscovery actuals ====================
+
+internal actual class ServiceDiscovery(
+    val channel: Channel<ServiceDiscoveryEvent>,
+    val service: NSNetService,
+    val browser: NSNetServiceBrowser,
+)
+
+internal actual suspend fun <T> withServiceDiscovery(
+    peerId: String,
+    serviceName: String,
+    displayName: String,
+    localAddress: String,
+    localPort: Int,
+    block: suspend CoroutineScope.(ServiceDiscovery) -> T,
+): T {
+    val serviceType = "_${serviceName}._udp."
+    val channel = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
+
+    val resolverDelegates = mutableListOf<NetServiceResolveDelegate>()
+
+    // NSNetService requires Main thread for setup
+    val (netService, netServiceBrowser) = withContext(Dispatchers.Main) {
+        val fullServiceName = formatServiceName(displayName, peerId, localAddress, localPort)
+        NSLog("[PeerNet-$peerId] Registering service: $fullServiceName")
+
+        val publishDelegate = NetServicePublishDelegate(peerId)
+        val ns = NSNetService(
+            domain = "local.",
+            type = serviceType,
+            name = fullServiceName,
+            port = localPort
+        )
+        ns.delegate = publishDelegate
+        ns.publish()
+        ns.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+
+        val browserDelegate = NetServiceBrowserDelegate(
+            peerId = peerId,
+            onServiceFound = { service ->
+                NSLog("[PeerNet-$peerId] Found service: ${service.name}")
+                val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
+                    channel.trySend(ServiceDiscoveryEvent.Discovered(resolvedService.name))
+                }
+                resolverDelegates.add(resolveDelegate)
+                service.delegate = resolveDelegate
+                service.resolveWithTimeout(5.0)
+            }
+        )
+
+        val browser = NSNetServiceBrowser()
+        browser.delegate = browserDelegate
+        browser.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
+        browser.searchForServicesOfType(serviceType, inDomain = "local.")
+
+        Pair(ns, browser)
+    }
+
+    val sd = ServiceDiscovery(channel, netService, netServiceBrowser)
+    return try {
+        coroutineScope { block(sd) }
+    } finally {
+        withContext(NonCancellable + Dispatchers.Main) {
+            netServiceBrowser.stop()
+            netService.stop()
+        }
+    }
+}
+
+internal actual val ServiceDiscovery.events: ReceiveChannel<ServiceDiscoveryEvent>
+    get() = channel
+
+internal actual fun ServiceDiscovery.trySendEvent(event: ServiceDiscoveryEvent) {
+    channel.trySend(event)
+}
+
+// ==================== Platform transport config ====================
 
 /**
  * Thread-safe peer state map using compare-and-set on an immutable map snapshot.
@@ -175,123 +251,37 @@ internal class AtomicPeerStates : PeerStates {
     }
 }
 
-internal actual suspend fun <T> withTransport(
-    config: PeerNetConfig,
-    peerId: String,
-    block: suspend CoroutineScope.(TransportHandle) -> T,
-): T {
-    val serviceType = "_${config.serviceName}._udp."
-    val discoveryEvents = Channel<ServiceDiscoveryEvent>(Channel.BUFFERED)
-
-    NSLog("[PeerNet-$peerId] Starting peer discovery")
-    val localAddress = getLocalIpAddress()
-    NSLog("[PeerNet-$peerId] Local IP: $localAddress")
-
-    return withUdpSocket(peerId) { socket ->
-        NSLog("[PeerNet-$peerId] Listening on port ${socket.localPort}")
-
-        // Start Bonjour on Main thread (required by NSNetService)
-        val resolverDelegates = mutableListOf<NetServiceResolveDelegate>()
-        val bonjourState = withContext(Dispatchers.Main) {
-            startBonjour(config, peerId, localAddress, socket.localPort, serviceType, discoveryEvents, resolverDelegates)
-        }
-
-        val handle = TransportHandle(
-            localAddress = localAddress,
-            localPort = socket.localPort,
-            discoveryEvents = discoveryEvents,
-            receivedPackets = socket.receivedPackets(),
-            sendUdp = { address, port, message -> socket.send(address, port, message) },
-            platformTasks = {
-                // Drive the RunLoop so Bonjour delegate callbacks fire
-                launch {
-                    while (true) {
-                        withContext(Dispatchers.Main) {
-                            NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
-                        }
-                        delay(50.milliseconds)
-                    }
-                }
-                // BLE transport — discovery + data fallback
-                launch {
-                    withBleTransport(peerId, localAddress, socket.localPort) { ble ->
-                        launch {
-                            for (peerInfo in ble.discoveredPeers) {
-                                val serviceName = formatServiceName(peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port)
-                                discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(serviceName))
-                            }
-                        }
-                        // BLE incoming data — not currently bridged into the receivedPackets flow.
-                        // BLE peers also get UDP handshakes, so the common layer discovers them
-                        // via UDP. If a BLE-only peer is needed, this would need a merged flow.
-                        awaitCancellation()
-                    }
-                }
-            },
-        )
-
-        try {
-            block(handle)
-        } finally {
-            withContext(NonCancellable + Dispatchers.Main) {
-                bonjourState.browser.stop()
-                bonjourState.service.stop()
-            }
-            NSLog("[PeerNet-$peerId] Stopped")
-        }
-    }
-}
-
-// ==================== Bonjour ====================
-
-private data class BonjourState(
-    val service: NSNetService,
-    val browser: NSNetServiceBrowser,
-)
-
-private fun startBonjour(
+internal actual fun createPlatformTransportConfig(
     config: PeerNetConfig,
     peerId: String,
     localAddress: String,
-    boundPort: Int,
-    serviceType: String,
-    discoveryEvents: SendChannel<ServiceDiscoveryEvent>,
-    resolverDelegates: MutableList<NetServiceResolveDelegate>,
-): BonjourState {
-    val serviceName = formatServiceName(config.displayName, peerId, localAddress, boundPort)
-    NSLog("[PeerNet-$peerId] Registering service: $serviceName")
-
-    val publishDelegate = NetServicePublishDelegate(peerId)
-    val netService = NSNetService(
-        domain = "local.",
-        type = serviceType,
-        name = serviceName,
-        port = boundPort
-    )
-    netService.delegate = publishDelegate
-    netService.publish()
-    netService.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
-
-    val browserDelegate = NetServiceBrowserDelegate(
-        peerId = peerId,
-        onServiceFound = { service ->
-            NSLog("[PeerNet-$peerId] Found service: ${service.name}")
-            val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
-                discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(resolvedService.name))
+    socket: UdpSocket,
+    sd: ServiceDiscovery,
+): PlatformTransportConfig = PlatformTransportConfig(
+    platformTasks = {
+        // Drive the RunLoop so Bonjour delegate callbacks fire
+        launch {
+            while (true) {
+                withContext(Dispatchers.Main) {
+                    NSRunLoop.currentRunLoop.runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.05))
+                }
+                delay(50.milliseconds)
             }
-            resolverDelegates.add(resolveDelegate)
-            service.delegate = resolveDelegate
-            service.resolveWithTimeout(5.0)
         }
-    )
-
-    val netServiceBrowser = NSNetServiceBrowser()
-    netServiceBrowser.delegate = browserDelegate
-    netServiceBrowser.scheduleInRunLoop(NSRunLoop.currentRunLoop, forMode = NSDefaultRunLoopMode)
-    netServiceBrowser.searchForServicesOfType(serviceType, inDomain = "local.")
-
-    return BonjourState(service = netService, browser = netServiceBrowser)
-}
+        // BLE transport — discovery + data fallback
+        launch {
+            withBleTransport(peerId, localAddress, socket.localPort) { ble ->
+                launch {
+                    for (peerInfo in ble.discoveredPeers) {
+                        val serviceName = formatServiceName(peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port)
+                        sd.trySendEvent(ServiceDiscoveryEvent.Discovered(serviceName))
+                    }
+                }
+                awaitCancellation()
+            }
+        }
+    },
+)
 
 // ==================== Bonjour Delegates ====================
 
@@ -330,7 +320,7 @@ private class NetServicePublishDelegate(private val peerId: String) : NSObject()
     }
 }
 
-internal class NetServiceResolveDelegate(
+private class NetServiceResolveDelegate(
     private val peerId: String,
     private val onResolved: (NSNetService) -> Unit
 ) : NSObject(), NSNetServiceDelegateProtocol {

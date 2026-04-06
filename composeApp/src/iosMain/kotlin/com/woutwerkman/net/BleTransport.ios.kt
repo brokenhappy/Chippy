@@ -274,6 +274,7 @@ private class CentralManagerDelegate(
         state.connectingPeripherals.remove(didDisconnectPeripheral)
         val disconnectedPeerId = state.peerPeripherals.entries
             .find { it.value == didDisconnectPeripheral }?.key
+        state.discoveredPeripheralIds.remove(didDisconnectPeripheral.identifier.UUIDString)
         if (disconnectedPeerId != null) {
             state.peerPeripherals.remove(disconnectedPeerId)
             state.peerWriteCharacteristics.remove(disconnectedPeerId)

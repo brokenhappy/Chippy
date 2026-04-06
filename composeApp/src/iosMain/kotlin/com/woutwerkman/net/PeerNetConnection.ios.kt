@@ -185,9 +185,12 @@ internal actual suspend fun <T> withServiceDiscovery(
             peerId = peerId,
             onServiceFound = { service ->
                 NSLog("[PeerNet-$peerId] Found service: ${service.name}")
-                val resolveDelegate = NetServiceResolveDelegate(peerId) { resolvedService ->
-                    channel.trySend(ServiceDiscoveryEvent.Discovered(resolvedService.name))
-                }
+                val resolveDelegate = NetServiceResolveDelegate(peerId,
+                    onResolved = { resolvedService ->
+                        channel.trySend(ServiceDiscoveryEvent.Discovered(resolvedService.name))
+                    },
+                    onDone = { resolverDelegates.remove(it) },
+                )
                 resolverDelegates.add(resolveDelegate)
                 service.delegate = resolveDelegate
                 service.resolveWithTimeout(5.0)
@@ -322,14 +325,17 @@ private class NetServicePublishDelegate(private val peerId: String) : NSObject()
 
 private class NetServiceResolveDelegate(
     private val peerId: String,
-    private val onResolved: (NSNetService) -> Unit
+    private val onResolved: (NSNetService) -> Unit,
+    private val onDone: (NetServiceResolveDelegate) -> Unit,
 ) : NSObject(), NSNetServiceDelegateProtocol {
 
     override fun netServiceDidResolveAddress(sender: NSNetService) {
         onResolved(sender)
+        onDone(this)
     }
 
     override fun netService(sender: NSNetService, didNotResolve: Map<Any?, *>) {
         NSLog("[PeerNet-$peerId] Service did not resolve: $didNotResolve")
+        onDone(this)
     }
 }

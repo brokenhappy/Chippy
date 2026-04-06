@@ -71,7 +71,8 @@ tasks.register<JavaExec>("testConnectivity") {
     group = "verification"
     description = "Test network connectivity between platforms"
 
-    timeout.set(Duration.ofSeconds(120))
+    val skipPlatforms = project.findProperty("skip-platforms")?.toString() ?: ""
+    timeout.set(Duration.ofSeconds(if ("ios-real-device" in skipPlatforms && "ios-simulator" in skipPlatforms) 30 else 120))
 
     val jvmCompilation = kotlin.targets.getByName("jvm").compilations.getByName("main")
     val runtimeFiles = jvmCompilation.runtimeDependencyFiles ?: files()
@@ -79,7 +80,6 @@ tasks.register<JavaExec>("testConnectivity") {
     mainClass.set("com.woutwerkman.connectivitytest.ConnectivityTestRunnerKt")
     systemProperty("project.root", rootDir.absolutePath)
 
-    val skipPlatforms = project.findProperty("skip-platforms")?.toString() ?: ""
     if (skipPlatforms.isNotEmpty()) {
         args("--skip-platform", skipPlatforms)
     }

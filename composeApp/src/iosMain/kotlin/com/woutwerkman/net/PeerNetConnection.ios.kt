@@ -393,7 +393,6 @@ private fun createUdpSocket(peerId: String): Int {
         val reuseAddr = alloc<IntVar>()
         reuseAddr.value = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reuseAddr.ptr, sizeOf<IntVar>().toUInt())
-        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, reuseAddr.ptr, sizeOf<IntVar>().toUInt())
 
         val addr = alloc<sockaddr_in>()
         addr.sin_family = AF_INET.toUByte()

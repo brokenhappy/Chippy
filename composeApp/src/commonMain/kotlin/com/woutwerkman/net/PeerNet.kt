@@ -546,7 +546,7 @@ suspend fun <T> withPeerNetConnection(
         val eventChannel = Channel<EventWithTime>(Channel.BUFFERED)
         val localEvents = Channel<EventWithTime>(Channel.BUFFERED)
         withEventLinearizer(eventChannel, clock) { state ->
-            launch { gossipRouter(rawConn, eventChannel, localEvents, config.displayName, clock) }
+            val gossipJob = launch { gossipRouter(rawConn, eventChannel, localEvents, config.displayName, clock) }
             val connection = object : PeerNetConnection {
                 override val localId: String = rawConn.localPeerId
                 override val state: StateFlow<PeerNetState> = state
@@ -560,6 +560,9 @@ suspend fun <T> withPeerNetConnection(
             try {
                 block(connection)
             } finally {
+                // Cancel the gossip router so withEventLinearizer's coroutineScope
+                // doesn't block waiting for it.
+                gossipJob.cancel()
                 // Best-effort: inform all peers we're leaving before the connection closes.
                 // Uses broadcastDirect to bypass the channel (the channel-processing
                 // coroutine is already cancelled at this point).

@@ -52,6 +52,12 @@ suspend fun runConnectivityTestProtocol(
 
         uiState.update { it.copy(phase = ConnectivityTestPhase.DONE) }
         sendLine("DONE")
+
+        // Keep the peer connection alive until the coordinator signals SHUTDOWN.
+        // Without this, fast platforms tear down their connection before slow platforms
+        // have discovered them — the Left event removes the peer from state before the
+        // slow platform's state.first { } can observe it.
+        readLine() // SHUTDOWN
     }
 }
 
@@ -63,7 +69,9 @@ fun matchedPlatforms(
     val matched = mutableSetOf<TestPlatform>()
     for ((peerId, peer) in state.discoveredPeers) {
         if (peer.name == instanceId) continue
-        val platform = TestPlatform.fromPeerId(peerId) ?: continue
+        // Prefer display name for platform detection (the test coordinator sets distinctive
+        // instanceIds like "ios-sim", "ios-device", "jvm-1"), fall back to peer ID prefix.
+        val platform = TestPlatform.fromPeerId(peer.name) ?: TestPlatform.fromPeerId(peerId) ?: continue
         val normalized = normalizePlatform(platform, targets)
         if (normalized != null) matched.add(normalized)
     }

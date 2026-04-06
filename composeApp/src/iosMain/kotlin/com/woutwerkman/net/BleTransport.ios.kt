@@ -3,7 +3,7 @@ package com.woutwerkman.net
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.SendChannel
 import platform.CoreBluetooth.*
 import platform.Foundation.*
 import platform.darwin.NSObject
@@ -16,43 +16,24 @@ private val PEER_INFO_UUID = CBUUID.UUIDWithString("7C3E0001-C4F1-4D5A-A1E2-0000
 private val DATA_WRITE_UUID = CBUUID.UUIDWithString("7C3E0002-C4F1-4D5A-A1E2-000000000000")
 private val DATA_NOTIFY_UUID = CBUUID.UUIDWithString("7C3E0003-C4F1-4D5A-A1E2-000000000000")
 
-/**
- * Represents a BLE connection providing discovery and data transport.
- */
-internal class BleConnection(
-    /** Peers discovered via BLE (peerId, address, port). */
-    val discoveredPeers: ReceiveChannel<PeerInfo>,
-    /** Data received from BLE peers (peerId to payload). */
-    val incoming: ReceiveChannel<Pair<String, ByteArray>>,
-    /** Send data to a specific peer over BLE. Returns true if sent. */
-    val sendToPeer: (peerId: String, data: ByteArray) -> Boolean,
-)
-
-/**
- * Runs BLE transport (peripheral + central) for the duration of [block].
- * Structured concurrency: everything is cleaned up when block completes or is cancelled.
- */
-internal suspend fun <T> withBleTransport(
+internal actual suspend fun <T> withBlePlatform(
     peerId: String,
-    localAddress: String,
-    localPort: Int,
-    block: suspend CoroutineScope.(BleConnection) -> T,
-): T = coroutineScope {
-    val discoveryChannel = Channel<PeerInfo>(Channel.BUFFERED)
-    val incomingDataChannel = Channel<Pair<String, ByteArray>>(Channel.BUFFERED)
+    peerInfoData: ByteArray,
+    discoveryChannel: SendChannel<PeerInfo>,
+    incomingChannel: SendChannel<Pair<String, ByteArray>>,
+    block: suspend CoroutineScope.(sendToPeer: (String, ByteArray) -> Boolean) -> T,
+): T {
     val bleQueue = dispatch_queue_create("com.woutwerkman.ble", null)
-
-    val peerInfoData = encodePeerInfoForBle(peerId, localAddress, localPort)
 
     // Shared mutable state accessed only from bleQueue
     val bleState = BleSharedState(peerId)
 
     // Create delegates (order matters: peripheralReadDelegate is used by centralDelegate)
     val peripheralReadDelegate = PeripheralReadDelegate(
-        peerId, discoveryChannel, incomingDataChannel, bleState,
+        peerId, discoveryChannel, incomingChannel, bleState,
     )
     val peripheralDelegate = PeripheralManagerDelegate(
-        peerId, peerInfoData, incomingDataChannel, bleState,
+        peerId, peerInfoData, incomingChannel, bleState,
     )
     val centralDelegate = CentralManagerDelegate(
         peerId, bleState, peripheralReadDelegate,
@@ -67,14 +48,8 @@ internal suspend fun <T> withBleTransport(
         bleState.sendToPeer(peerId, targetPeerId, data)
     }
 
-    val connection = BleConnection(
-        discoveredPeers = discoveryChannel,
-        incoming = incomingDataChannel,
-        sendToPeer = sendToPeer,
-    )
-
-    try {
-        coroutineScope { block(connection) }
+    return try {
+        coroutineScope { block(sendToPeer) }
     } finally {
         withContext(NonCancellable) {
             NSLog("[BLE-$peerId] Stopping BLE transport")
@@ -83,8 +58,7 @@ internal suspend fun <T> withBleTransport(
             for (peripheral in bleState.connectingPeripherals) {
                 centralManager.cancelPeripheralConnection(peripheral)
             }
-            discoveryChannel.close()
-            incomingDataChannel.close()
+            // Channels are owned by withBleTransport — do not close here
         }
     }
 }
@@ -135,7 +109,7 @@ private class BleSharedState(val localPeerId: String) {
 private class PeripheralManagerDelegate(
     private val peerId: String,
     private val peerInfoData: ByteArray,
-    private val incomingDataChannel: Channel<Pair<String, ByteArray>>,
+    private val incomingDataChannel: SendChannel<Pair<String, ByteArray>>,
     private val state: BleSharedState,
 ) : NSObject(), CBPeripheralManagerDelegateProtocol {
 
@@ -312,8 +286,8 @@ private class CentralManagerDelegate(
 @OptIn(ExperimentalObjCRefinement::class)
 private class PeripheralReadDelegate(
     private val peerId: String,
-    private val discoveryChannel: Channel<PeerInfo>,
-    private val incomingDataChannel: Channel<Pair<String, ByteArray>>,
+    private val discoveryChannel: SendChannel<PeerInfo>,
+    private val incomingDataChannel: SendChannel<Pair<String, ByteArray>>,
     private val state: BleSharedState,
 ) : NSObject(), CBPeripheralDelegateProtocol {
 

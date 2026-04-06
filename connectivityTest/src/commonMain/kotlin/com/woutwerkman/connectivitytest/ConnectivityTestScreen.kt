@@ -168,5 +168,4 @@ private fun platformDisplayName(platform: TestPlatform): String = when (platform
     TestPlatform.ANDROID_REAL_DEVICE -> "Android Device"
     TestPlatform.IOS_SIMULATOR -> "iOS Simulator"
     TestPlatform.IOS_REAL_DEVICE -> "iOS Device"
-    TestPlatform.MAC_BLE_HELPER -> "Mac BLE Helper"
 }

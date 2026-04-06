@@ -3,6 +3,7 @@ package com.woutwerkman.net
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.*
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import java.net.*
@@ -42,6 +43,31 @@ internal actual suspend fun <T> withTransport(
             if (localAddress == "10.0.2.15") {
                 launch {
                     probeEmulatorGateway(peerId, config.displayName, localAddress, localPort, udpSocket)
+                }
+            }
+            // BLE transport — discovery + data fallback (mirrors iOS pattern)
+            launch {
+                withBleTransport(peerId, localAddress, localPort) { ble ->
+                    launch {
+                        for (peerInfo in ble.discoveredPeers) {
+                            val serviceName = formatServiceName(
+                                peerInfo.name, peerInfo.id, peerInfo.address, peerInfo.port,
+                            )
+                            discoveryEvents.trySend(ServiceDiscoveryEvent.Discovered(serviceName))
+                        }
+                    }
+                    launch {
+                        for ((fromPeerId, payload) in ble.incoming) {
+                            receivedPackets.trySend(
+                                ReceivedPacket(
+                                    "$fromPeerId:${payload.decodeToString()}",
+                                    localAddress,
+                                    localPort,
+                                )
+                            )
+                        }
+                    }
+                    awaitCancellation()
                 }
             }
         },

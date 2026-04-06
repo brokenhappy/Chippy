@@ -1,6 +1,9 @@
 package com.woutwerkman.connectivitytest
 
-import com.woutwerkman.connectivitytest.launchers.*
+import com.woutwerkman.connectivitytest.launchers.AndroidLauncher
+import com.woutwerkman.connectivitytest.launchers.IosDeviceLauncher
+import com.woutwerkman.connectivitytest.launchers.IosSimulatorLauncher
+import com.woutwerkman.connectivitytest.launchers.JvmLauncher
 import com.woutwerkman.net.*
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
@@ -12,7 +15,7 @@ import kotlin.time.Duration.Companion.seconds
  * By default runs ALL platforms and errors if any is unavailable.
  * Use --skip-platform <name> to exclude specific platforms.
  *
- * Platforms: jvm, android-simulator, android-real-device, ios-simulator, ios-real-device, mac-ble-helper
+ * Platforms: jvm, android-simulator, android-real-device, ios-simulator, ios-real-device
  */
 fun main(args: Array<String>) {
     val noHeadless = args.contains("--no-headless")
@@ -61,7 +64,9 @@ suspend fun runStructuredConnectivityTest(
     println("Testing platforms: ${availablePlatforms.joinToString(", ") { it.type.toString() }}")
     println()
 
-    val hasBle = availablePlatforms.any { it.type == TestPlatform.MAC_BLE_HELPER }
+    val hasBle = availablePlatforms.any {
+        it.type == TestPlatform.ANDROID_REAL_DEVICE || it.type == TestPlatform.IOS_REAL_DEVICE
+    }
     return runConnectivityTest(
         platforms = availablePlatforms,
         spinUpTimeout = 15.seconds,
@@ -82,7 +87,7 @@ suspend fun runStructuredConnectivityTest(
  */
 fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
-    val allPlatforms = listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device", "mac-ble-helper")
+    val allPlatforms = listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device")
 
     val invalidPlatforms = skippedPlatforms - allPlatforms.toSet()
     require(invalidPlatforms.isEmpty()) {
@@ -153,24 +158,12 @@ fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean =
                 )
             }
 
-            "mac-ble-helper" -> {
-                val binaryPath = buildBleHelperOnce()
-                    ?: error("Failed to build BLE test helper (use --skip-platform mac-ble-helper to skip)")
-                configs.add(
-                    PlatformConfig(
-                        type = TestPlatform.MAC_BLE_HELPER,
-                        instanceId = "mac-ble-helper",
-                        runner = BleHelperLauncher(binaryPath),
-                    )
-                )
-            }
         }
     }
 
-    // Always add JVM when there are other network platforms — it acts as a gossip relay
+    // Always add JVM when there are other platforms — it acts as a gossip relay
     if ("jvm" !in skippedPlatforms) {
-        val networkConfigs = configs.filter { it.type != TestPlatform.MAC_BLE_HELPER }
-        val hasOtherPlatforms = networkConfigs.isNotEmpty()
+        val hasOtherPlatforms = configs.isNotEmpty()
         val jvmCount = if (hasOtherPlatforms) 1 else 2
         repeat(jvmCount) { i ->
             configs.add(
@@ -187,67 +180,6 @@ fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean =
 }
 
 // Helper functions for platform detection and building
-
-private var cachedBleHelperPath: String? = null
-
-fun buildBleHelperOnce(): String? {
-    cachedBleHelperPath?.let { return it }
-    val path = buildBleHelper()
-    cachedBleHelperPath = path
-    return path
-}
-
-fun buildBleHelper(): String? {
-    val rootDir = System.getProperty("project.root") ?: "."
-    val sourceFile = java.io.File("$rootDir/bleTestHelper/main.swift")
-    val appBundle = "$rootDir/bleTestHelper/BleTestHelper.app"
-    val outputFile = java.io.File("$appBundle/Contents/MacOS/ble-test-helper")
-
-    if (!sourceFile.exists()) {
-        println("BLE test helper source not found: ${sourceFile.path}")
-        return null
-    }
-
-    // Only rebuild if source is newer than binary (avoids invalidating TCC permission)
-    if (outputFile.exists() && outputFile.lastModified() >= sourceFile.lastModified()) {
-        println("BLE test helper is up to date")
-        return appBundle
-    }
-
-    println("Building BLE test helper...")
-    outputFile.parentFile.mkdirs()
-
-    var process = ProcessBuilder(
-        "swiftc", "-o", outputFile.path, sourceFile.path,
-        "-framework", "CoreBluetooth", "-framework", "Foundation"
-    ).directory(java.io.File(rootDir)).inheritIO().start()
-
-    if (process.waitFor() != 0) {
-        println("Failed to compile BLE test helper")
-        return null
-    }
-
-    // Ad-hoc code sign with Bluetooth entitlement
-    val entitlements = java.io.File.createTempFile("ble-entitlements", ".plist").apply {
-        writeText("""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>com.apple.security.device.bluetooth</key><true/>
-</dict></plist>""")
-        deleteOnExit()
-    }
-    process = ProcessBuilder(
-        "codesign", "-s", "-", "-f", "--entitlements", entitlements.absolutePath, appBundle
-    ).directory(java.io.File(rootDir)).inheritIO().start()
-
-    if (process.waitFor() != 0) {
-        println("Warning: Failed to code sign BLE test helper")
-    }
-
-    println("BLE test helper built. NOTE: You may need to approve Bluetooth access in System Settings > Privacy & Security > Bluetooth for 'BleTestHelper'")
-
-    return appBundle
-}
 
 private var cachedApkPath: String? = null
 

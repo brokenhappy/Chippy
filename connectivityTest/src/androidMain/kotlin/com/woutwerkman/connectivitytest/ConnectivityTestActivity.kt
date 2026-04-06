@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import com.woutwerkman.net.BleApplicationContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.BufferedReader
@@ -16,6 +17,7 @@ class ConnectivityTestActivity : ComponentActivity() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        BleApplicationContext.context = applicationContext
         super.onCreate(savedInstanceState)
 
         val instanceId = intent.getStringExtra("instanceId") ?: "android-1"

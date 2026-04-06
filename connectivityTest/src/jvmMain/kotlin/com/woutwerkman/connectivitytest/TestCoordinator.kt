@@ -95,7 +95,7 @@ private suspend fun runPlatformTestLifecycle(
 }
 
 private fun discoveryTargetsFor(platformType: TestPlatform, allTypes: Set<TestPlatform>): List<String> {
-    val otherTypes = (allTypes - TestPlatform.MAC_BLE_HELPER) - platformType
+    val otherTypes = allTypes - platformType
     return if (otherTypes.isEmpty()) {
         listOf(platformType.toPlatformString())
     } else {

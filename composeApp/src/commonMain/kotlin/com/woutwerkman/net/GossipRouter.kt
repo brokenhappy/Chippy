@@ -53,6 +53,7 @@ internal suspend fun gossipRouter(
 ) = coroutineScope {
     val directConnections = mutableSetOf<String>()
     val eventLog = mutableListOf<EventWithTime>()
+    val eventSet = mutableSetOf<EventWithTime>() // O(1) dedup companion for eventLog
     // reachabilityMap: directPeerId -> set of their DIRECT peers
     val reachabilityMap = mutableMapOf<String, Set<String>>()
     // Peers we discovered via direct connection or reachability (not gossip).
@@ -105,7 +106,7 @@ internal suspend fun gossipRouter(
     }
 
     suspend fun emitEvent(ewt: EventWithTime) {
-        if (ewt !in eventLog) {
+        if (eventSet.add(ewt)) {
             eventLog.add(ewt)
             eventChannel.send(ewt)
         }
@@ -146,7 +147,7 @@ internal suspend fun gossipRouter(
                 val ewt = try {
                     linJson.decodeFromString<EventWithTime>(payload.removePrefix(LIN_EVENT))
                 } catch (_: Exception) { return }
-                if (ewt !in eventLog) {
+                if (eventSet.add(ewt)) {
                     eventLog.add(ewt)
                     eventChannel.send(ewt)
                     broadcastToAll(payload)
@@ -157,7 +158,7 @@ internal suspend fun gossipRouter(
                     linJson.decodeFromString<List<EventWithTime>>(payload.removePrefix(LIN_STATE_RESP))
                 } catch (_: Exception) { return }
                 for (ewt in received) {
-                    if (ewt !in eventLog) {
+                    if (eventSet.add(ewt)) {
                         eventLog.add(ewt)
                         eventChannel.send(ewt)
                         broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
@@ -295,7 +296,7 @@ internal suspend fun gossipRouter(
             }
 
             localEvents.onReceive { ewt ->
-                if (ewt !in eventLog) {
+                if (eventSet.add(ewt)) {
                     eventLog.add(ewt)
                     broadcastToAll("$LIN_EVENT${linJson.encodeToString(ewt)}")
                 }

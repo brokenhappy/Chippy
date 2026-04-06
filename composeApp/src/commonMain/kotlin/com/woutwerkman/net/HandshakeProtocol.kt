@@ -59,18 +59,28 @@ internal fun parseServiceName(serviceName: String): HelloData? {
 }
 
 /**
- * Parses "name|peerId|address|port" robustly: the last 3 segments are
- * port, address, peerId (none of which contain pipes), and everything
- * before them is the display name (which may contain pipes).
+ * Parses "name|peerId|address|port" robustly. Port, address, and peerId
+ * never contain pipes, so with 4+ parts we parse from the right and let
+ * the display name absorb any extra pipes. With exactly 3 parts (no port)
+ * we fall back to left-to-right.
  */
 private fun parsePipeDelimited(value: String, fallbackAddress: String): HelloData {
     val parts = value.split("|")
-    if (parts.size < 3) return HelloData("Unknown", "", fallbackAddress, MESSAGE_PORT)
-    val port = parts.last().toIntOrNull() ?: MESSAGE_PORT
-    val address = parts[parts.size - 2].ifEmpty { fallbackAddress }
-    val peerId = parts[parts.size - 3]
-    val peerName = parts.dropLast(3).joinToString("|").ifEmpty { "Unknown" }
-    return HelloData(peerName, peerId, address, port)
+    return when {
+        parts.size >= 4 -> HelloData(
+            peerName = parts.dropLast(3).joinToString("|"),
+            peerId = parts[parts.size - 3],
+            address = parts[parts.size - 2].ifEmpty { fallbackAddress },
+            port = parts.last().toIntOrNull() ?: MESSAGE_PORT,
+        )
+        parts.size == 3 -> HelloData(
+            peerName = parts[0],
+            peerId = parts[1],
+            address = parts[2].ifEmpty { fallbackAddress },
+            port = MESSAGE_PORT,
+        )
+        else -> HelloData("Unknown", "", fallbackAddress, MESSAGE_PORT)
+    }
 }
 
 internal fun formatServiceName(peerName: String, peerId: String, localAddress: String, localPort: Int): String =

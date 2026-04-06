@@ -33,8 +33,8 @@ internal actual fun getLocalIpAddress(): String {
             }
             freeifaddrs(ifaddrsVar.value)
 
-            return wifiIp ?: otherIp ?: "0.0.0.0"
+            return wifiIp ?: otherIp ?: "127.0.0.1"
         }
     }
-    return "0.0.0.0"
+    return "127.0.0.1"
 }

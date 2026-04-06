@@ -9,7 +9,7 @@ class IosDeviceLauncher(
     logger: (String) -> Unit = ::println,
 ) : ProcessRunner("ios-device", logger) {
 
-    override fun buildProcess(
+    override suspend fun buildProcess(
         instanceId: String,
         targets: List<String>,
         controlHost: String,

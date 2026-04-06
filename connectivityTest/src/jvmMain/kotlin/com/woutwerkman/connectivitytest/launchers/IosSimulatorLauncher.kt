@@ -9,7 +9,7 @@ class IosSimulatorLauncher(
     logger: (String) -> Unit = ::println,
 ) : ProcessRunner("ios-sim", logger) {
 
-    override fun buildProcess(
+    override suspend fun buildProcess(
         instanceId: String,
         targets: List<String>,
         controlHost: String,

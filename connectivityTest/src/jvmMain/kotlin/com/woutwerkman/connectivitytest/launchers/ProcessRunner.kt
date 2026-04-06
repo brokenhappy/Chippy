@@ -1,6 +1,7 @@
 package com.woutwerkman.connectivitytest.launchers
 
 import com.woutwerkman.connectivitytest.PlatformRunner
+import com.woutwerkman.util.withProcess
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
@@ -19,7 +20,7 @@ abstract class ProcessRunner(
     private val logger: (String) -> Unit = ::println,
 ) : PlatformRunner {
 
-    protected abstract fun buildProcess(
+    protected abstract suspend fun buildProcess(
         instanceId: String,
         targets: List<String>,
         controlHost: String,
@@ -38,11 +39,7 @@ abstract class ProcessRunner(
         val controlHost = getLocalIpAddress()
 
         try {
-            return coroutineScope {
-                val process = withContext(Dispatchers.IO) {
-                    buildProcess(instanceId, targets, controlHost, controlPort).start()
-                }
-
+            return withProcess(buildProcess(instanceId, targets, controlHost, controlPort)) { process ->
                 val stdoutJob = launchStreamLogger(process.inputStream, logPrefix)
                 val stderrLines = mutableListOf<String>()
                 val stderrJob = launchStreamLogger(process.errorStream, "$logPrefix/err", stderrLines)
@@ -69,12 +66,7 @@ abstract class ProcessRunner(
                         writerJob.cancel()
                         stdoutJob.cancel()
                         stderrJob.cancel()
-                        withContext(Dispatchers.IO) {
-                            socket.close()
-                            process.destroy()
-                            val exited = process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-                            if (!exited) process.destroyForcibly()
-                        }
+                        withContext(Dispatchers.IO) { socket.close() }
                     }
                 }
             }

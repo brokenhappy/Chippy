@@ -1,5 +1,6 @@
 package com.woutwerkman.net
 
+import com.woutwerkman.util.withProcess
 import kotlinx.coroutines.*
 import java.net.*
 
@@ -11,22 +12,17 @@ internal actual fun createPlatformTransportConfig(
     sd: ServiceDiscovery,
 ): PlatformTransportConfig {
     val isMac = System.getProperty("os.name").lowercase().contains("mac")
-    val dnsSdProcess: Process? = if (isMac) {
-        ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
-            .redirectErrorStream(true)
-            .start()
-    } else null
 
-    return PlatformTransportConfig(
+    return if (!isMac) PlatformTransportConfig() else PlatformTransportConfig(
         platformTasks = {
-            if (dnsSdProcess != null) {
-                launch(Dispatchers.IO) {
-                    readDnsSdOutput(dnsSdProcess, config.serviceName, peerId, sd)
+            launch(Dispatchers.IO) {
+                withProcess(
+                    ProcessBuilder("dns-sd", "-B", "_${config.serviceName}._udp.", "local.")
+                        .redirectErrorStream(true)
+                ) { process ->
+                    readDnsSdOutput(process, config.serviceName, peerId, sd)
                 }
             }
-        },
-        prepareForTeardown = {
-            dnsSdProcess?.destroyForcibly()
         },
     )
 }

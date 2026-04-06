@@ -207,7 +207,6 @@ internal suspend fun <T> withRawPeerNetConnectionCommon(
             } finally {
                 incoming.close()
                 outgoing.close()
-                transport.prepareForTeardown()
                 childTasks.cancel()
             }
         }

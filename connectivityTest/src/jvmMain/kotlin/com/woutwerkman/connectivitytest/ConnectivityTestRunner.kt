@@ -5,7 +5,12 @@ import com.woutwerkman.connectivitytest.launchers.IosDeviceLauncher
 import com.woutwerkman.connectivitytest.launchers.IosSimulatorLauncher
 import com.woutwerkman.connectivitytest.launchers.JvmLauncher
 import com.woutwerkman.net.*
+import com.woutwerkman.util.run
+import com.woutwerkman.util.runAndReadOutput
+import com.woutwerkman.util.withProcess
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.seconds
 
@@ -85,7 +90,7 @@ suspend fun runStructuredConnectivityTest(
  * Platforms in [skippedPlatforms] are silently excluded.
  * Any non-skipped platform that is unavailable causes an error.
  */
-fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
+suspend fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean = false): List<PlatformConfig> {
     val configs = mutableListOf<PlatformConfig>()
     val allPlatforms = listOf("jvm", "android-simulator", "android-real-device", "ios-simulator", "ios-real-device")
 
@@ -183,17 +188,16 @@ fun detectAvailablePlatforms(skippedPlatforms: Set<String>, showJvmUi: Boolean =
 
 private var cachedApkPath: String? = null
 
-fun buildAndroidApkOnce(): String {
+suspend fun buildAndroidApkOnce(): String {
     cachedApkPath?.let { return it }
     val path = buildAndroidApk()
     cachedApkPath = path
     return path
 }
 
-fun getConnectedAndroidDevices(): List<Pair<String, TestPlatform>> {
+suspend fun getConnectedAndroidDevices(): List<Pair<String, TestPlatform>> {
     return try {
-        val process = ProcessBuilder("adb", "devices").start()
-        val output = process.inputStream.bufferedReader().readText()
+        val output = ProcessBuilder("adb", "devices").runAndReadOutput()
         output.lines()
             .filter { it.isNotBlank() && it.contains("\tdevice") }
             .map { line ->
@@ -206,10 +210,9 @@ fun getConnectedAndroidDevices(): List<Pair<String, TestPlatform>> {
     }
 }
 
-fun getBootedIosSimulators(): List<Pair<String, String>> {
+suspend fun getBootedIosSimulators(): List<Pair<String, String>> {
     return try {
-        val process = ProcessBuilder("xcrun", "simctl", "list", "devices", "available").start()
-        val output = process.inputStream.bufferedReader().readText()
+        val output = ProcessBuilder("xcrun", "simctl", "list", "devices", "available").runAndReadOutput()
         val simulators = mutableListOf<Pair<String, String>>()
         for (line in output.lines()) {
             if (line.contains("(Booted)") && line.contains("iPhone")) {
@@ -226,10 +229,9 @@ fun getBootedIosSimulators(): List<Pair<String, String>> {
     }
 }
 
-fun getConnectedIosDevices(): List<Pair<String, String>> {
+suspend fun getConnectedIosDevices(): List<Pair<String, String>> {
     return try {
-        val process = ProcessBuilder("xcrun", "devicectl", "list", "devices").start()
-        val output = process.inputStream.bufferedReader().readText()
+        val output = ProcessBuilder("xcrun", "devicectl", "list", "devices").runAndReadOutput()
         val devices = mutableListOf<Pair<String, String>>()
         for (line in output.lines()) {
             if (line.contains("connected") && line.contains("iPhone")) {
@@ -249,38 +251,30 @@ fun getConnectedIosDevices(): List<Pair<String, String>> {
     }
 }
 
-fun buildAndroidApk(): String {
+suspend fun buildAndroidApk(): String {
     println("Building Android APK...")
     val rootDir = System.getProperty("project.root") ?: "."
-    val process = ProcessBuilder(
+    ProcessBuilder(
         "$rootDir/gradlew",
         ":connectivityTestAndroidApp:assembleDebug",
         "--no-configuration-cache",
         "-q"
-    ).directory(java.io.File(rootDir)).inheritIO().start()
-
-    if (process.waitFor() != 0) {
-        throw IllegalStateException("Failed to build Android APK")
-    }
+    ).directory(java.io.File(rootDir)).inheritIO().run()
     return "$rootDir/connectivityTestAndroidApp/build/outputs/apk/debug/connectivityTestAndroidApp-debug.apk"
 }
 
-fun buildIosSimulatorApp(udid: String) {
+suspend fun buildIosSimulatorApp(udid: String) {
     println("Building iOS simulator app...")
     val rootDir = System.getProperty("project.root") ?: "."
 
-    var process = ProcessBuilder(
+    ProcessBuilder(
         "$rootDir/gradlew",
         ":connectivityTest:linkDebugFrameworkIosSimulatorArm64",
         "--no-configuration-cache",
         "-q"
-    ).directory(java.io.File(rootDir)).inheritIO().start()
+    ).directory(java.io.File(rootDir)).inheritIO().run()
 
-    if (process.waitFor() != 0) {
-        throw IllegalStateException("Failed to build Kotlin framework for iOS simulator")
-    }
-
-    process = ProcessBuilder(
+    ProcessBuilder(
         "xcodebuild",
         "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
         "-scheme", "iosConnectivityTest",
@@ -290,44 +284,32 @@ fun buildIosSimulatorApp(udid: String) {
         "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
         "FRAMEWORK_SEARCH_PATHS=$rootDir/connectivityTest/build/bin/iosSimulatorArm64/debugFramework",
         "build"
-    ).directory(java.io.File(rootDir)).inheritIO().start()
+    ).directory(java.io.File(rootDir)).inheritIO().run()
 
-    if (process.waitFor() != 0) {
-        throw IllegalStateException("Failed to build iOS simulator app with Xcode")
-    }
-
-    process = ProcessBuilder(
+    ProcessBuilder(
         "xcrun", "simctl", "install",
         udid,
         "$rootDir/build/ios-test-derived-data/Build/Products/Debug-iphonesimulator/iosConnectivityTest.app"
-    ).inheritIO().start()
-
-    if (process.waitFor() != 0) {
-        throw IllegalStateException("Failed to install iOS simulator app")
-    }
+    ).inheritIO().run()
 }
 
-fun buildIosDeviceApp(udid: String) {
+suspend fun buildIosDeviceApp(udid: String) {
     println("Building iOS device app...")
     val rootDir = System.getProperty("project.root") ?: "."
 
-    var process = ProcessBuilder(
+    ProcessBuilder(
         "$rootDir/gradlew",
         ":connectivityTest:linkDebugFrameworkIosArm64",
         "--no-configuration-cache",
         "-q"
-    ).directory(java.io.File(rootDir)).inheritIO().start()
-
-    if (process.waitFor() != 0) {
-        throw IllegalStateException("Failed to build Kotlin framework for iOS device")
-    }
+    ).directory(java.io.File(rootDir)).inheritIO().run()
 
     val simFrameworkDir = java.io.File("$rootDir/connectivityTest/build/bin/iosSimulatorArm64/debugFramework")
     val simFramework = java.io.File(simFrameworkDir, "ConnectivityTest.framework")
     if (!simFramework.exists()) {
         simFrameworkDir.mkdirs()
         val deviceFramework = java.io.File("$rootDir/connectivityTest/build/bin/iosArm64/debugFramework/ConnectivityTest.framework")
-        ProcessBuilder("ln", "-s", deviceFramework.absolutePath, simFramework.absolutePath).start().waitFor()
+        ProcessBuilder("ln", "-s", deviceFramework.absolutePath, simFramework.absolutePath).run()
     }
 
     val xcodeDerivedDataApp = java.io.File(System.getProperty("user.home"))
@@ -340,38 +322,29 @@ fun buildIosDeviceApp(udid: String) {
         println("Using existing Xcode build from: ${xcodeDerivedDataApp.absolutePath}")
         xcodeDerivedDataApp.absolutePath
     } else {
-        process = ProcessBuilder(
-            "xcodebuild",
-            "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
-            "-scheme", "iosConnectivityTest",
-            "-configuration", "Debug",
-            "-sdk", "iphoneos",
-            "-arch", "arm64",
-            "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
-            "-allowProvisioningUpdates",
-            "FRAMEWORK_SEARCH_PATHS=$rootDir/connectivityTest/build/bin/iosArm64/debugFramework",
-            "build"
-        ).directory(java.io.File(rootDir)).inheritIO().start()
-
-        if (!process.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            throw IllegalStateException("iOS device build timed out after 120 seconds - you may need to build once in Xcode first to approve code signing")
-        }
-
-        if (process.exitValue() != 0) {
-            throw IllegalStateException("Failed to build iOS device app with Xcode")
-        }
+        withTimeoutOrNull(120.seconds) {
+            ProcessBuilder(
+                "xcodebuild",
+                "-project", "$rootDir/iosConnectivityTest/iosConnectivityTest.xcodeproj",
+                "-scheme", "iosConnectivityTest",
+                "-configuration", "Debug",
+                "-sdk", "iphoneos",
+                "-arch", "arm64",
+                "-derivedDataPath", "$rootDir/build/ios-test-derived-data",
+                "-allowProvisioningUpdates",
+                "FRAMEWORK_SEARCH_PATHS=$rootDir/connectivityTest/build/bin/iosArm64/debugFramework",
+                "build"
+            ).directory(java.io.File(rootDir)).inheritIO().run()
+        } ?: throw IllegalStateException(
+            "iOS device build timed out after 120 seconds — you may need to build once in Xcode first to approve code signing",
+        )
 
         "$rootDir/build/ios-test-derived-data/Build/Products/Debug-iphoneos/iosConnectivityTest.app"
     }
 
-    val installProcess = ProcessBuilder(
+    ProcessBuilder(
         "xcrun", "devicectl", "device", "install", "app",
         "--device", udid,
         appPath
-    ).inheritIO().start()
-
-    if (installProcess.waitFor() != 0) {
-        throw IllegalStateException("Failed to install iOS device app")
-    }
+    ).inheritIO().run()
 }

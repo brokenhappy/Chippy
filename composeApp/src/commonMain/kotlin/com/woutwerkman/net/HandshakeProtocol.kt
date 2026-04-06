@@ -39,13 +39,7 @@ internal data class HelloData(
 
 internal fun parseHelloPayload(payload: String, fallbackAddress: String): HelloData {
     val helloData = payload.removePrefix(HANDSHAKE_HELLO)
-    val parts = helloData.split("|")
-    return HelloData(
-        peerName = parts.getOrNull(0) ?: "Unknown",
-        peerId = parts.getOrNull(1) ?: "",
-        address = parts.getOrNull(2) ?: fallbackAddress,
-        port = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT,
-    )
+    return parsePipeDelimited(helloData, fallbackAddress)
 }
 
 internal fun formatHelloPayload(peerName: String, peerId: String, localAddress: String, localPort: Int): String =
@@ -61,12 +55,22 @@ internal fun formatAckPayload(peerId: String): String =
 internal fun parseServiceName(serviceName: String): HelloData? {
     val parts = serviceName.split("|")
     if (parts.size < 3) return null
-    return HelloData(
-        peerName = parts[0],
-        peerId = parts[1],
-        address = parts[2],
-        port = parts.getOrNull(3)?.toIntOrNull() ?: MESSAGE_PORT,
-    )
+    return parsePipeDelimited(serviceName, "")
+}
+
+/**
+ * Parses "name|peerId|address|port" robustly: the last 3 segments are
+ * port, address, peerId (none of which contain pipes), and everything
+ * before them is the display name (which may contain pipes).
+ */
+private fun parsePipeDelimited(value: String, fallbackAddress: String): HelloData {
+    val parts = value.split("|")
+    if (parts.size < 3) return HelloData("Unknown", "", fallbackAddress, MESSAGE_PORT)
+    val port = parts.last().toIntOrNull() ?: MESSAGE_PORT
+    val address = parts[parts.size - 2].ifEmpty { fallbackAddress }
+    val peerId = parts[parts.size - 3]
+    val peerName = parts.dropLast(3).joinToString("|").ifEmpty { "Unknown" }
+    return HelloData(peerName, peerId, address, port)
 }
 
 internal fun formatServiceName(peerName: String, peerId: String, localAddress: String, localPort: Int): String =

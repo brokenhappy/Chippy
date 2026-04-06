@@ -43,7 +43,7 @@ fun runIosConnectivityTest(
     // The iOS app process lifetime is managed by the coordinator; when coordinator
     // cancels, the process is killed, so there's no leak risk.
     @OptIn(DelicateCoroutinesApi::class)
-    GlobalScope.launch(Dispatchers.Main) {
+    GlobalScope.launch(Dispatchers.Default) {
         try {
             val controlSocket = connectToControlServer(controlHost, controlPort)
             if (controlSocket < 0) {
